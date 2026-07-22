@@ -3,6 +3,7 @@ import imkit as imk
 from PIL import Image
 import numpy as np
 import logging
+from contextlib import nullcontext
 
 from ..utils.inpainting import (
     load_jit_model,
@@ -26,7 +27,8 @@ class MIGAN(TorchAutocastMixin, InpaintModel):
     pad_mod = 512
     pad_to_square = True
     is_erase_model = True
-    use_pipeline_for_onnx = False
+    preferred_backend = "onnx"
+    use_pipeline_for_onnx = True
 
     def init_model(self, device, **kwargs):
         self.backend = kwargs.get("backend")
@@ -45,7 +47,7 @@ class MIGAN(TorchAutocastMixin, InpaintModel):
 
     @staticmethod
     def is_downloaded() -> bool:
-        return ModelDownloader.is_downloaded(ModelID.MIGAN_JIT)
+        return ModelDownloader.is_downloaded(ModelID.MIGAN_PIPELINE_ONNX)
 
     def __call__(self, image, mask, config: Config):
         """
@@ -53,8 +55,14 @@ class MIGAN(TorchAutocastMixin, InpaintModel):
         masks: [H, W]
         return: BGR IMAGE
         """
-        import torch  # noqa
-        with torch.no_grad():
+        backend = getattr(self, 'backend', 'onnx')
+        if backend == 'onnx':
+            inference_context = nullcontext()
+        else:
+            import torch  # noqa
+            inference_context = torch.no_grad()
+
+        with inference_context:
             if image.shape[0] == 512 and image.shape[1] == 512:
                 return self._pad_forward(image, mask, config)
 
@@ -97,7 +105,7 @@ class MIGAN(TorchAutocastMixin, InpaintModel):
         """
 
         backend = getattr(self, 'backend', 'torch')
-        if backend == 'onnx' and getattr(self, 'use_pipeline', False):
+        if backend == 'onnx' and self.use_pipeline_for_onnx:
             # Pipeline model expects uint8 RGB image and uint8 grayscale mask
             # Convert mask to binary (255 for known, 0 for masked)
             binary_mask = np.where(mask > 120, 0, 255).astype(np.uint8)  # Invert: 0=masked, 255=known

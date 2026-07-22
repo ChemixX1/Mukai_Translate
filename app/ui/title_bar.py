@@ -424,6 +424,10 @@ class _ProjectDetailsPopup(QtWidgets.QFrame):
         self._bg = QtGui.QColor(bg)
         self._fg = QtGui.QColor(fg)
         is_light_theme = self._fg.lightness() < 128
+        is_black_theme = (
+            not is_light_theme
+            and dayu_theme.background_color.lower() == "#000000"
+        )
         if is_light_theme:
             panel_bg = "#ffffff"
             input_bg = "#ffffff"
@@ -431,13 +435,17 @@ class _ProjectDetailsPopup(QtWidgets.QFrame):
             border_color = QtGui.QColor(0, 0, 0, 28)
             muted = "#5f6368"
             browse_bg = "#f5f6f7"
+            accent = dayu_theme.primary_color
+            accent_hover = dayu_theme.primary_5
         else:
-            panel_bg = "#313131"
-            input_bg = "#262626"
-            border = "rgba(255,255,255,34)"
-            border_color = QtGui.QColor(255, 255, 255, 34)
-            muted = "#b7b7b7"
-            browse_bg = "#3a3a3a"
+            panel_bg = "#050505" if is_black_theme else "#111722"
+            input_bg = "#111111" if is_black_theme else "#161C27"
+            border = "#262626" if is_black_theme else "#1D2430"
+            border_color = QtGui.QColor(border)
+            muted = "#B8B8B8" if is_black_theme else "#AAB4C1"
+            browse_bg = "#0A0A0A" if is_black_theme else "#141A25"
+            accent = dayu_theme.primary_color
+            accent_hover = dayu_theme.primary_5
 
         self._bg = QtGui.QColor(panel_bg)
         self._border = border_color
@@ -468,10 +476,10 @@ class _ProjectDetailsPopup(QtWidgets.QFrame):
                 border: 1px solid {border};
                 background: {input_bg};
                 color: {fg};
-                selection-background-color: rgba(24, 144, 255, 90);
+                selection-background-color: {accent};
             }}
             QLineEdit#projectPopupLineEdit:focus {{
-                border: 1px solid #1677ff;
+                border: 1px solid {accent};
             }}
             QPushButton#projectPopupBrowseButton {{
                 min-height: 34px;
@@ -482,7 +490,7 @@ class _ProjectDetailsPopup(QtWidgets.QFrame):
                 color: {fg};
             }}
             QPushButton#projectPopupBrowseButton:hover {{
-                border: 1px solid #1677ff;
+                border: 1px solid {accent};
             }}
             QPushButton#projectPopupApplyButton {{
                 min-width: 88px;
@@ -490,12 +498,12 @@ class _ProjectDetailsPopup(QtWidgets.QFrame):
                 padding: 0 12px;
                 border: none;
                 border-radius: 10px;
-                background: #1677ff;
+                background: {accent};
                 color: white;
                 font-weight: 600;
             }}
             QPushButton#projectPopupApplyButton:hover {{
-                background: #2a85ff;
+                background: {accent_hover};
             }}
         """)
         self.update()
@@ -896,7 +904,7 @@ class CustomTitleBar(QtWidgets.QWidget):
                 border: 1px solid {switch_off_border};
             }}
             MSwitch#titleBarAutosaveSwitch::indicator:checked {{
-                background-color: #1890ff;
+                background-color: {dayu_theme.primary_color};
             }}
             MToolButton,
             MToolButton:hover,

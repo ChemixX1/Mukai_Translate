@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING
+from app.glossary import append_glossary_context
 from modules.translation.processor import Translator
 from modules.utils.translator_utils import set_upper_case
 from pipeline.webtoon_utils import filter_and_convert_visible_blocks, restore_original_block_coordinates
@@ -34,12 +35,18 @@ class TranslationHandler:
         if self.main_page.image_viewer.hasPhoto() and self.main_page.blk_list:
             settings_page = self.main_page.settings_page
             image = self.main_page.image_viewer.get_image_array()
-            extra_context = settings_page.get_llm_settings()['extra_context']
+            extra_context = append_glossary_context(
+                settings_page.get_llm_settings()['extra_context']
+            )
             translator_key = settings_page.get_tool_selection('translator')
 
             upper_case = settings_page.ui.uppercase_checkbox.isChecked()
 
             translator = Translator(self.main_page, source_lang, target_lang)
+            extra_context = translator.prepare_context(
+                self.main_page.blk_list,
+                extra_context,
+            )
             
             # Get translation cache key
             translation_cache_key = self.cache_manager._get_translation_cache_key(
@@ -135,10 +142,13 @@ class TranslationHandler:
         
         # Perform translation on the visible image with filtered blocks
         settings_page = self.main_page.settings_page
-        extra_context = settings_page.get_llm_settings()['extra_context']
+        extra_context = append_glossary_context(
+            settings_page.get_llm_settings()['extra_context']
+        )
         upper_case = settings_page.ui.uppercase_checkbox.isChecked()
         
         translator = Translator(self.main_page, source_lang, target_lang)
+        extra_context = translator.prepare_context(visible_blocks, extra_context)
         translator.translate(visible_blocks, visible_image, extra_context)
         
         # Translation is set, now restore original coordinates

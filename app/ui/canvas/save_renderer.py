@@ -1,3 +1,4 @@
+import os
 from PySide6 import QtCore, QtGui, QtWidgets
 import imkit as imk
 import numpy as np
@@ -9,6 +10,10 @@ class ImageSaveRenderer:
     def __init__(self, image: np.ndarray):
         self.rgb_image = image
         self.scene = QtWidgets.QGraphicsScene()
+        # PySide can destroy Python-subclassed graphics items when their last
+        # Python reference disappears even though the C++ scene still appears
+        # to own them. Keep explicit references for the renderer lifetime.
+        self._owned_items = []
 
         self.qimage = self.img_array_to_qimage(image)
         # Create a QGraphicsPixmapItem with the QPixmap
@@ -43,11 +48,14 @@ class ImageSaveRenderer:
                 render_color=text_props.text_color,
                 alignment=text_props.alignment,
                 line_spacing=text_props.line_spacing,
+                letter_spacing=text_props.letter_spacing,
                 outline_color=text_props.outline_color,
                 outline_width=text_props.outline_width,
                 bold=text_props.bold,
+                font_weight=text_props.font_weight,
                 italic=text_props.italic,
                 underline=text_props.underline,
+                opacity=text_props.opacity,
                 direction=text_props.direction,
             )
 
@@ -60,10 +68,66 @@ class ImageSaveRenderer:
             text_item.setRotation(text_props.rotation)
             text_item.setScale(text_props.scale)
             text_item.set_vertical(bool(text_props.vertical))
+            text_item.set_letter_spacing(text_props.letter_spacing)
+            text_item.set_line_spacing(text_props.line_spacing)
+            if getattr(text_props, 'fixed_wrap_width', None):
+                text_item.set_fixed_wrap_width(text_props.fixed_wrap_width)
+            if text_props.fill_style:
+                text_item.set_fill_style(text_props.fill_style)
+            text_item.set_text_warp(
+                text_props.warp
+                or (
+                    text_props.fill_style.get('warp', {})
+                    if isinstance(text_props.fill_style, dict) else {}
+                )
+            )
             text_item.selection_outlines = text_props.selection_outlines
             text_item.update()
 
             self.scene.addItem(text_item)
+            self._owned_items.append(text_item)
+
+        self.add_watermark_items(state)
+
+    def add_watermark_items(self, state):
+        """Render manually placed watermark images into the export scene."""
+        for wm in state.get('watermark_items_state', []):
+            source_path = self._resolve_watermark_path(wm.get('source_path', ''))
+            if not source_path:
+                continue
+            ensure_path_materialized(source_path)
+            pixmap = QtGui.QPixmap(source_path)
+            if pixmap.isNull():
+                continue
+
+            wm_item = QtWidgets.QGraphicsPixmapItem(pixmap)
+            wm_item.setTransformationMode(QtCore.Qt.TransformationMode.SmoothTransformation)
+            wm_item.setScale(wm.get('scale', 1.0))
+            pos = wm.get('position', (0, 0))
+            wm_item.setPos(QtCore.QPointF(*pos))
+            wm_item.setTransformOriginPoint(pixmap.rect().center())
+            wm_item.setRotation(wm.get('rotation', 0.0))
+            # Keep watermark above the page and text items.
+            wm_item.setZValue(1000)
+            self.scene.addItem(wm_item)
+            self._owned_items.append(wm_item)
+
+    def _resolve_watermark_path(self, source_path: str) -> str:
+        if source_path and os.path.exists(source_path):
+            return source_path
+
+        project_root = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        )
+        candidates = [
+            os.path.join(project_root, "resources", "static", "watermark.png"),
+            os.path.join(project_root, "resources", "static", "marca de agua.png"),
+            os.path.join(project_root, "marca de agua.png"),
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        return source_path
 
     def add_spanning_text_items(self, viewer_state, page_idx, main_page):
         """
@@ -165,17 +229,25 @@ class ImageSaveRenderer:
                 render_color=text_props.text_color,
                 alignment=text_props.alignment,
                 line_spacing=text_props.line_spacing,
+                letter_spacing=text_props.letter_spacing,
                 outline_color=text_props.outline_color,
                 outline_width=text_props.outline_width,
                 bold=text_props.bold,
+                font_weight=text_props.font_weight,
                 italic=text_props.italic,
                 underline=text_props.underline,
+                opacity=text_props.opacity,
                 direction=text_props.direction,
             )
             text_item.set_text(text_props.text, text_props.width)
             if text_props.direction:
                 text_item.set_direction(text_props.direction)
             text_item.set_vertical(bool(text_props.vertical))
+            text_item.set_letter_spacing(text_props.letter_spacing)
+            text_item.set_line_spacing(text_props.line_spacing)
+            if getattr(text_props, 'fixed_wrap_width', None):
+                text_item.set_fixed_wrap_width(text_props.fixed_wrap_width)
+            text_item.set_text_warp(text_props.warp)
             return float(text_item.boundingRect().height())
         except Exception:
             return None
@@ -233,6 +305,70 @@ class ImageSaveRenderer:
         final_rgb = self.render_to_image()
         imk.write_image(output_path, final_rgb)
 
+    def render_background_to_image(self) -> np.ndarray:
+        """Render only the cleaned page and inpainting patches.
+
+        Export super-resolution runs on this layer before translated text is
+        drawn, preventing the AI model from deforming glyph edges.
+        """
+        hidden_items = []
+        for item in self.scene.items():
+            if item is self.pixmap_item or item.parentItem() is not None:
+                continue
+            hidden_items.append((item, item.isVisible()))
+            item.setVisible(False)
+        try:
+            return self._render_scene_rgba(
+                (self.qimage.width(), self.qimage.height())
+            )[:, :, :3].copy()
+        finally:
+            for item, was_visible in hidden_items:
+                item.setVisible(was_visible)
+
+    def render_overlay_to_image(self, target_size: tuple[int, int]) -> np.ndarray:
+        """Render text and watermark layers to a transparent target-size image."""
+        was_visible = self.pixmap_item.isVisible()
+        self.pixmap_item.setVisible(False)
+        try:
+            return self._render_scene_rgba(target_size)
+        finally:
+            self.pixmap_item.setVisible(was_visible)
+
+    def _render_scene_rgba(self, target_size: tuple[int, int]) -> np.ndarray:
+        width = max(1, int(target_size[0]))
+        height = max(1, int(target_size[1]))
+        qimage = QtGui.QImage(
+            width,
+            height,
+            QtGui.QImage.Format.Format_RGBA8888,
+        )
+        qimage.fill(QtCore.Qt.GlobalColor.transparent)
+
+        painter = QtGui.QPainter(qimage)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing, True)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform, True)
+        self.scene.render(
+            painter,
+            QtCore.QRectF(0.0, 0.0, float(width), float(height)),
+            self.scene.sceneRect(),
+            QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
+        )
+        painter.end()
+
+        qimage = qimage.convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
+        bytes_per_line = qimage.bytesPerLine()
+        buffer = np.frombuffer(
+            qimage.bits(),
+            dtype=np.uint8,
+            count=qimage.height() * bytes_per_line,
+        ).reshape((qimage.height(), bytes_per_line))
+        return (
+            buffer[:, : qimage.width() * 4]
+            .reshape((qimage.height(), qimage.width(), 4))
+            .copy()
+        )
+
     def apply_patches(self, patches: list[dict]):
         """Apply inpainting patches to the image."""
 
@@ -257,6 +393,7 @@ class ImageSaveRenderer:
             # Position the patch relative to its parent (pixmap_item)
             patch_item.setPos(x, y)
             patch_item.setZValue(self.pixmap_item.zValue() + 0.5)
+            self._owned_items.append(patch_item)
 
 
 

@@ -1,5 +1,5 @@
 import logging
-from modules.ocr.processor import OCRProcessor
+from modules.ocr.processor import OCRProcessor, get_effective_ocr_settings
 from modules.utils.device import resolve_device
 from pipeline.webtoon_utils import filter_and_convert_visible_blocks, restore_original_block_coordinates
 
@@ -23,7 +23,17 @@ class OCRHandler:
             device = resolve_device(
                 self.main_page.settings_page.is_gpu_enabled()
             )
-            cache_key = self.cache_manager._get_ocr_cache_key(image, source_lang, ocr_model, device)
+            cache_source_lang, cache_ocr_model = get_effective_ocr_settings(
+                self.main_page,
+                source_lang,
+                ocr_model,
+            )
+            cache_key = self.cache_manager._get_ocr_cache_key(
+                image,
+                cache_source_lang,
+                cache_ocr_model,
+                device,
+            )
             
             if single_block:
                 blk = self.pipeline.get_selected_block()

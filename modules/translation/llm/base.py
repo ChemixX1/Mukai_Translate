@@ -38,8 +38,8 @@ class BaseLLMTranslation(LLMTranslation):
         self.source_lang = source_lang
         self.target_lang = target_lang
         self.img_as_llm_input = llm_settings.get('image_input_enabled', True)
-        self.temperature = 1.0
-        self.top_p = 0.95
+        self.temperature = 0.3
+        self.top_p = 0.9
         self.max_tokens = 5000
         
     def translate(self, blk_list: list[TextBlock], image: np.ndarray, extra_context: str) -> list[TextBlock]:
@@ -56,12 +56,36 @@ class BaseLLMTranslation(LLMTranslation):
         """
         entire_raw_text = get_raw_text(blk_list)
         system_prompt = self.get_system_prompt(self.source_lang, self.target_lang)
-        user_prompt = f"{extra_context}\nMake the translation sound as natural as possible.\nTranslate this:\n{entire_raw_text}"
+        user_prompt = self._build_translation_prompt(entire_raw_text, extra_context)
         
         entire_translated_text = self._perform_translation(user_prompt, system_prompt, image)
-        set_texts_from_json(blk_list, entire_translated_text)
+        if not set_texts_from_json(blk_list, entire_translated_text):
+            repair_prompt = self._build_repair_prompt(entire_raw_text, entire_translated_text)
+            repaired_text = self._perform_translation(repair_prompt, system_prompt, image)
+            if not set_texts_from_json(blk_list, repaired_text):
+                raise ValueError("LLM translation response was not valid JSON with all expected block keys.")
             
         return blk_list
+
+    def _build_translation_prompt(self, entire_raw_text: str, extra_context: str) -> str:
+        context = (extra_context or "").strip()
+        context_section = f"Comic/context notes:\n{context}\n\n" if context else ""
+        return (
+            f"{context_section}"
+            "Translate the following JSON object. Return only valid JSON with the exact same keys.\n"
+            "Every value must be a string.\n\n"
+            f"{entire_raw_text}"
+        )
+
+    def _build_repair_prompt(self, entire_raw_text: str, previous_response: str) -> str:
+        return (
+            "Your previous response was not valid JSON with the exact same block keys.\n"
+            "Repair it now. Return only one valid JSON object, with no markdown or explanation.\n\n"
+            "Original input JSON:\n"
+            f"{entire_raw_text}\n\n"
+            "Previous response:\n"
+            f"{(previous_response or '')[:6000]}"
+        )
     
     @abstractmethod
     def _perform_translation(self, user_prompt: str, system_prompt: str, image: np.ndarray) -> str:

@@ -56,7 +56,17 @@ class PageListItemDelegate(QStyledItemDelegate):
         metrics = painter.fontMetrics()
         text = metrics.elidedText(str(text), Qt.TextElideMode.ElideMiddle, text_rect.width())
 
-        pen_color = option.palette.highlightedText().color() if selected else option.palette.text().color()
+        view = self.parent()
+        is_black = bool(view and view.property("mukaiThemeVariant") == "black")
+        pen_color = (
+            QColor("#000000")
+            if selected and is_black
+            else (
+                option.palette.highlightedText().color()
+                if selected
+                else option.palette.text().color()
+            )
+        )
         if strike_out and not selected:
             pen_color = option.palette.mid().color()
         painter.setPen(pen_color)
@@ -72,11 +82,18 @@ class PageListItemDelegate(QStyledItemDelegate):
         return QSize(self.THUMB_SIZE.width() + 120, self.ROW_HEIGHT)
 
     def _background_color(self, option) -> QColor:
-        base = QColor(dayu_theme.background_color)
+        view = self.parent()
+        is_dark = bool(view.property("mukaiDarkTheme")) if view else False
+        variant = str(view.property("mukaiThemeVariant") or "") if view else ""
+        is_black = variant == "black"
+        base = QColor("#000000" if is_black else "#0B0F19") if is_dark else QColor(dayu_theme.background_color)
         if option.state & QStyle.StateFlag.State_Selected:
-            return QColor(dayu_theme.background_selected_color)
+            if is_black:
+                return QColor("#FFFFFF")
+            return QColor("#1A314F") if is_dark else QColor("#F9E1E7")
         if option.state & QStyle.StateFlag.State_MouseOver:
-            return self._blend_colors(base, QColor(dayu_theme.background_selected_color), 0.18)
+            accent = QColor("#242424" if is_black else "#1A314F") if is_dark else QColor("#F9E1E7")
+            return self._blend_colors(base, accent, 0.24)
         return base
 
     @staticmethod
@@ -99,6 +116,7 @@ class PageListView(QListWidget):
     del_img = Signal(list)
     toggle_skip_img = Signal(list, bool)  # list of images, bool for skip status (True=skip, False=unskip)
     translate_imgs = Signal(list)
+    replace_img = Signal(str)
     order_changed = Signal(list)  # reordered item identities (file paths when available)
 
     def __init__(self) -> None:
@@ -124,6 +142,22 @@ class PageListView(QListWidget):
         self.setItemDelegate(PageListItemDelegate(self))
         self.ui_elements()
         self.itemEntered.connect(self._on_item_entered)
+
+    def apply_theme(self, is_dark: bool, variant: str = "") -> None:
+        """Apply the page-rail surface and selection colours for the active theme."""
+        self.setProperty("mukaiDarkTheme", bool(is_dark))
+        self.setProperty("mukaiThemeVariant", variant)
+        background = (
+            "#000000" if variant == "black" else "#0B0F19"
+        ) if is_dark else dayu_theme.background_color
+        foreground = "#F5F7FA" if is_dark else dayu_theme.primary_text_color
+        self.setStyleSheet(
+            "QListWidget {"
+            f" background: {background}; color: {foreground};"
+            " border: none; outline: none;"
+            "}"
+        )
+        self.viewport().update()
 
     def ui_elements(self):
         self.insert_browser = MClickBrowserFilePushButton(multiple=True)
@@ -183,6 +217,14 @@ class PageListView(QListWidget):
         self.viewport().update()
 
     def contextMenuEvent(self, event: QContextMenuEvent):
+        # Make the context action apply to the page under the cursor, even
+        # when a different row was selected beforehand.
+        clicked_item = self.itemAt(event.pos())
+        if clicked_item and not clicked_item.isSelected():
+            self.clearSelection()
+            clicked_item.setSelected(True)
+            self.setCurrentItem(clicked_item)
+
         menu = MMenu(parent=self)
         insert = menu.addAction(self.tr('Insert'))
         delete_act = menu.addAction(self.tr('Delete'))
@@ -201,6 +243,13 @@ class PageListView(QListWidget):
 
         translate_act = menu.addAction(self.tr('Translate'))
         translate_act.triggered.connect(self.translate_selected_items)
+
+        replace_act = menu.addAction(self.tr('Replace'))
+        replace_item = clicked_item or self.currentItem()
+        replace_act.setEnabled(replace_item is not None)
+        if replace_item:
+            replace_path = self._item_identity(replace_item)
+            replace_act.triggered.connect(lambda: self.replace_img.emit(replace_path))
 
         menu.exec_(event.globalPos())
         super().contextMenuEvent(event)

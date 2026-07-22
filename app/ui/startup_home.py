@@ -62,19 +62,20 @@ class _NewCard(QtWidgets.QFrame):
 
     def apply_theme(self, is_dark: bool):
         if is_dark:
-            border   = "#484848"
-            bg       = "#3a3a3a"
-            bg_prev  = "#424242"
-            bg_lbl   = "#333333"
-            fg_lbl   = "#c0c0c0"
-            hover_b  = dayu_theme.primary_color or "#1890ff"
+            is_black = dayu_theme.background_color.lower() == "#000000"
+            border   = "#262626" if is_black else "#1D2430"
+            bg       = "#0A0A0A" if is_black else "#111722"
+            bg_prev  = "#111111" if is_black else "#161C27"
+            bg_lbl   = "#050505" if is_black else "#141A25"
+            fg_lbl   = "#F5F7FA"
+            hover_b  = dayu_theme.primary_color or "#168FF7"
         else:
             border   = "#d0d0d0"
             bg       = "#ffffff"
             bg_prev  = "#f0f0f0"
             bg_lbl   = "#f5f5f5"
             fg_lbl   = "#333333"
-            hover_b  = dayu_theme.primary_color or "#1890ff"
+            hover_b  = dayu_theme.primary_color or "#D13655"
 
         self.setStyleSheet(f"""
             QFrame#NewCard {{
@@ -195,19 +196,20 @@ class _RecentRow(QtWidgets.QFrame):
     def apply_theme(self, is_dark: bool):
         self._is_dark = is_dark
         if is_dark:
-            self._fg       = "#d0d0d0"
-            self._fg_sub   = "#777"
-            self._date_fg  = "#666"
-            self._hover    = "rgba(255,255,255,0.06)"
+            is_black = dayu_theme.background_color.lower() == "#000000"
+            self._fg       = "#F5F7FA"
+            self._fg_sub   = "#B8B8B8" if is_black else "#AAB4C1"
+            self._date_fg  = "#606060" if is_black else "#667386"
+            self._hover    = "#242424" if is_black else "#1A314F"
             self._normal   = "transparent"
-            self._accent   = dayu_theme.primary_color or "#1890ff"
+            self._accent   = dayu_theme.primary_color or "#168FF7"
         else:
             self._fg       = "#1a1a1a"
             self._fg_sub   = "#666"
             self._date_fg  = "#888"
             self._hover    = "rgba(0,0,0,0.04)"
             self._normal   = "transparent"
-            self._accent   = dayu_theme.primary_color or "#1890ff"
+            self._accent   = dayu_theme.primary_color or "#D13655"
         self._set_normal()
 
     def _set_normal(self):
@@ -259,11 +261,12 @@ class _RecentRow(QtWidgets.QFrame):
         menu = QtWidgets.QMenu(self)
         is_dark = bool(getattr(self, "_is_dark", True))
         if is_dark:
-            menu_bg = "#2f2f2f"
-            menu_border = "#4a4a4a"
-            item_fg = "#dddddd"
-            item_hover = "rgba(255,255,255,0.10)"
-            sep = "#4a4a4a"
+            is_black = dayu_theme.background_color.lower() == "#000000"
+            menu_bg = "#0A0A0A" if is_black else "#111722"
+            menu_border = "#262626" if is_black else "#1D2430"
+            item_fg = "#F5F7FA"
+            item_hover = "#242424" if is_black else "#1A314F"
+            sep = menu_border
         else:
             menu_bg = "#ffffff"
             menu_border = "#d9d9d9"
@@ -381,15 +384,16 @@ class _PillButton(QtWidgets.QPushButton):
 
     def apply_theme(self, is_dark: bool):
         if is_dark:
+            is_black = dayu_theme.background_color.lower() == "#000000"
             normal_bg   = "transparent"
-            normal_fg   = "#a0a0a0"
-            checked_bg  = "#1890ff"
-            checked_fg  = "#ffffff"
-            hover_bg    = "rgba(255,255,255,0.08)"
+            normal_fg   = "#B8B8B8" if is_black else "#AAB4C1"
+            checked_bg  = "#FFFFFF" if is_black else "#1462A9"
+            checked_fg  = "#000000" if is_black else "#ffffff"
+            hover_bg    = "#242424" if is_black else "#1A314F"
         else:
             normal_bg   = "transparent"
             normal_fg   = "#595959"
-            checked_bg  = "#1890ff"
+            checked_bg  = "#D13655"
             checked_fg  = "#ffffff"
             hover_bg    = "rgba(0,0,0,0.06)"
         self.setStyleSheet(f"""
@@ -657,14 +661,15 @@ class StartupHomeScreen(QtWidgets.QWidget):
     def _refresh_theme(self):
         d = self._is_dark
         if d:
-            fg       = "#d9d9d9"
-            fg_sub   = "#888"
-            hdr_fg   = "#a0a0a0"
-            div      = "#3a3a3a"
-            sb_bg    = "#3a3a3a"
-            sb_fg    = "#d0d0d0"
-            sb_ph    = "#666"
-            sb_brd   = "#505050"
+            is_black = dayu_theme.background_color.lower() == "#000000"
+            fg       = "#F5F7FA"
+            fg_sub   = "#B8B8B8" if is_black else "#AAB4C1"
+            hdr_fg   = fg_sub
+            div      = "#262626" if is_black else "#1D2430"
+            sb_bg    = "#111111" if is_black else "#161C27"
+            sb_fg    = "#F5F7FA"
+            sb_ph    = "#606060" if is_black else "#667386"
+            sb_brd   = div
         else:
             fg       = "#262626"
             fg_sub   = "#666"

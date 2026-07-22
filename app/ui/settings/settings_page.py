@@ -4,17 +4,59 @@ import logging
 from dataclasses import asdict, is_dataclass
 
 from PySide6 import QtWidgets, QtGui
-from PySide6.QtCore import Signal, QSettings, QUrl, Qt
+from PySide6.QtCore import Signal, QSettings, QUrl, Qt, QSignalBlocker
 from PySide6.QtGui import QFont, QFontDatabase, QDesktopServices
 
 from app.shortcuts import get_default_shortcuts
+from app.env_config import first_env_value, load_project_env
 from .settings_ui import SettingsPageUI
 from modules.utils.device import is_gpu_available
-from app.update_checker import UpdateChecker
+from app.update_checker import UpdateChecker, release_notes_to_html
 from modules.utils.paths import get_user_data_dir, get_default_project_autosave_dir
 
 
 logger = logging.getLogger(__name__)
+
+
+CREDENTIAL_FIELDS = {
+    "Custom": ("api_key", "api_url", "model"),
+    "Microsoft Azure": ("api_key_ocr", "endpoint", "api_key_translator", "region_translator"),
+    "Yandex": ("api_key", "folder_id"),
+}
+
+CREDENTIAL_ENV_KEYS = {
+    "Open AI GPT": {"api_key": ("OPENAI_API_KEY",)},
+    "Google Gemini": {"api_key": ("GEMINI_API_KEY", "GOOGLE_API_KEY")},
+    "Anthropic Claude": {"api_key": ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY")},
+    "Deepseek": {"api_key": ("DEEPSEEK_API_KEY",)},
+    "Grok": {"api_key": ("GROK_API_KEY", "XAI_API_KEY", "CUSTOM_OPENAI_API_KEY")},
+    "Custom": {
+        "api_key": ("CUSTOM_OPENAI_API_KEY", "CUSTOM_API_KEY"),
+        "api_url": ("CUSTOM_OPENAI_API_BASE", "CUSTOM_OPENAI_BASE_URL", "CUSTOM_API_BASE"),
+        "model": ("CUSTOM_OPENAI_MODEL", "CUSTOM_MODEL"),
+    },
+    "Microsoft Azure": {
+        "api_key_ocr": ("AZURE_VISION_API_KEY", "MICROSOFT_VISION_API_KEY", "AZURE_API_KEY"),
+        "endpoint": ("AZURE_VISION_ENDPOINT", "MICROSOFT_VISION_ENDPOINT", "AZURE_ENDPOINT"),
+        "api_key_translator": ("AZURE_TRANSLATOR_API_KEY", "MICROSOFT_TRANSLATOR_API_KEY", "AZURE_API_KEY"),
+        "region_translator": ("AZURE_TRANSLATOR_REGION", "MICROSOFT_TRANSLATOR_REGION", "AZURE_REGION"),
+    },
+    "Google Cloud": {"api_key": ("GOOGLE_CLOUD_API_KEY", "GOOGLE_API_KEY")},
+    "Yandex": {
+        "api_key": ("YANDEX_API_KEY", "YANDEX_SECRET_KEY"),
+        "folder_id": ("YANDEX_FOLDER_ID",),
+    },
+}
+
+MODEL_CREDENTIAL_PROVIDERS = (
+    ("GPT", "Open AI GPT"),
+    ("Gemini", "Google Gemini"),
+    ("Claude", "Anthropic Claude"),
+    ("Deepseek", "Deepseek"),
+    ("Grok", "Grok"),
+    ("Microsoft", "Microsoft Azure"),
+    ("Google Cloud", "Google Cloud"),
+)
 
 
 class SettingsPage(QtWidgets.QWidget):
@@ -29,6 +71,7 @@ class SettingsPage(QtWidgets.QWidget):
         self._loading_settings = False
         self._is_background_check = False
         self._current_language = None  # Track current language for revert
+        load_project_env()
 
         # Update Checker
         self.update_checker = UpdateChecker()
@@ -113,28 +156,50 @@ class SettingsPage(QtWidgets.QWidget):
         }
         return settings
 
-    def get_credentials(self, service: str = ""):
+    def _normalize_credential_service(self, service: str) -> str:
+        normalized = self.ui.value_mappings.get(service, service)
+        if normalized in CREDENTIAL_ENV_KEYS or normalized in CREDENTIAL_FIELDS:
+            return normalized
+
+        for marker, provider in MODEL_CREDENTIAL_PROVIDERS:
+            if marker in normalized:
+                return provider
+
+        return normalized
+
+    def _credential_fields_for(self, normalized: str) -> tuple[str, ...]:
+        return CREDENTIAL_FIELDS.get(normalized, ("api_key",))
+
+    def _credential_widget_value(self, normalized: str, field: str) -> str:
+        candidate_keys = [f"{normalized}_{field}"]
+        if normalized == "Microsoft Azure" and field == "region_translator":
+            candidate_keys.append("Microsoft Azure_region")
+
+        for widget_key in candidate_keys:
+            widget = self.ui.credential_widgets.get(widget_key)
+            if widget is not None:
+                return widget.text().strip()
+        return ""
+
+    def _credential_env_value(self, normalized: str, field: str) -> str:
+        return first_env_value(*CREDENTIAL_ENV_KEYS.get(normalized, {}).get(field, ()))
+
+    def get_credentials(self, service: str = "", include_env: bool = True):
         save_keys = self.ui.save_keys_checkbox.isChecked()
 
-        def _text_or_none(widget_key):
-            w = self.ui.credential_widgets.get(widget_key)
-            return w.text() if w is not None else None
-
         if service:
-            normalized = self.ui.value_mappings.get(service, service)
+            normalized = self._normalize_credential_service(service)
             creds = {'save_key': save_keys}
-            if normalized == "Custom":
-                for field in ("api_key", "api_url", "model"):
-                    creds[field] = _text_or_none(f"Custom_{field}")
-            else:
-                api_key = _text_or_none(f"{normalized}_api_key")
-                if api_key is not None:
-                    creds['api_key'] = api_key
-
+            for field in self._credential_fields_for(normalized):
+                value = self._credential_widget_value(normalized, field)
+                if not value and include_env:
+                    value = self._credential_env_value(normalized, field)
+                creds[field] = value
             return creds
 
+        return {s: self.get_credentials(s, include_env=include_env) for s in self.ui.credential_services}
+
         # no `service` passed → recurse over all known services
-        return {s: self.get_credentials(s) for s in self.ui.credential_services}
         
     def get_hd_strategy_settings(self):
         strategy = self.ui.inpaint_strategy_combo.currentText()
@@ -165,7 +230,7 @@ class SettingsPage(QtWidgets.QWidget):
             'llm': self.get_llm_settings(),
             'export': self.get_export_settings(),
             'shortcuts': self.ui.shortcuts_page.get_shortcuts(),
-            'credentials': self.get_credentials(),
+            'credentials': self.get_credentials(include_env=False),
             'save_keys': self.ui.save_keys_checkbox.isChecked(),
         }
 
@@ -250,17 +315,12 @@ class SettingsPage(QtWidgets.QWidget):
         settings.endGroup()
 
         # Always save credentials so they persist across sessions
-        credentials = self.get_credentials()
+        credentials = self.get_credentials(include_env=False)
         settings.beginGroup('credentials')
         for service, cred in credentials.items():
-            translated_service = self.ui.value_mappings.get(service, service)
-
-            if translated_service == "Custom":
-                settings.setValue(f"{translated_service}_api_key", cred.get('api_key', ''))
-                settings.setValue(f"{translated_service}_api_url", cred.get('api_url', ''))
-                settings.setValue(f"{translated_service}_model", cred.get('model', ''))
-            elif 'api_key' in cred:
-                settings.setValue(f"{translated_service}_api_key", cred['api_key'])
+            translated_service = self._normalize_credential_service(service)
+            for field in self._credential_fields_for(translated_service):
+                settings.setValue(f"{translated_service}_{field}", cred.get(field, ''))
         settings.endGroup()
 
     def load_settings(self):
@@ -273,9 +333,16 @@ class SettingsPage(QtWidgets.QWidget):
         self.ui.lang_combo.setCurrentText(translated_language)
 
         # Load theme
-        theme = settings.value('theme', 'Dark')
+        theme = settings.value('theme', 'Blue')
+        if theme == "Dark":
+            theme = "Blue"
         translated_theme = self.ui.reverse_mappings.get(theme, theme)
-        self.ui.theme_combo.setCurrentText(translated_theme)
+        # Loading the saved value used to apply the complete application QSS
+        # twice: once through currentTextChanged and once through the explicit
+        # emission below.  Applying it once keeps startup responsive while
+        # preserving the exact same selected theme and final appearance.
+        with QSignalBlocker(self.ui.theme_combo):
+            self.ui.theme_combo.setCurrentText(translated_theme)
         self.theme_changed.emit(translated_theme)
 
         # Load tools settings
@@ -370,17 +437,11 @@ class SettingsPage(QtWidgets.QWidget):
         # Always load credentials
         settings.beginGroup('credentials')
         for service in self.ui.credential_services:
-            translated_service = self.ui.value_mappings.get(service, service)
-
-            if translated_service == "Custom":
-                for field in ("api_key", "api_url", "model"):
-                    w = self.ui.credential_widgets.get(f"{translated_service}_{field}")
-                    if w is not None:
-                        w.setText(settings.value(f"{translated_service}_{field}", ''))
-            else:
-                w = self.ui.credential_widgets.get(f"{translated_service}_api_key")
+            translated_service = self._normalize_credential_service(service)
+            for field in self._credential_fields_for(translated_service):
+                w = self.ui.credential_widgets.get(f"{translated_service}_{field}")
                 if w is not None:
-                    w.setText(settings.value(f"{translated_service}_api_key", ''))
+                    w.setText(settings.value(f"{translated_service}_{field}", ''))
         settings.endGroup()
 
         # Initialize current language tracker after loading
@@ -459,9 +520,14 @@ class SettingsPage(QtWidgets.QWidget):
         if not is_background:
             self.ui.check_update_button.setEnabled(False)
             self.ui.check_update_button.setText(self.tr("Checking..."))
+        if not self.update_checker.is_configured:
+            self.on_update_error(
+                self.tr("The Mukai update channel has not been configured for this edition yet.")
+            )
+            return
         self.update_checker.check_for_updates()
 
-    def on_update_available(self, version, release_url, download_url):
+    def on_update_available(self, version, release_notes, download_url, checksum):
         if not self._is_background_check:
             self.ui.check_update_button.setEnabled(True)
             self.ui.check_update_button.setText(self.tr("Check for Updates"))
@@ -478,8 +544,12 @@ class SettingsPage(QtWidgets.QWidget):
         msg_box.setTextFormat(Qt.RichText)
         msg_box.setTextInteractionFlags(Qt.TextBrowserInteraction)
         msg_box.setText(self.tr("A new version {version} is available.").format(version=version))
-        link_text = self.tr("Release Notes")
-        msg_box.setInformativeText(f'<a href="{release_url}" style="color: #4da6ff;">{link_text}</a>')
+        notes_html = release_notes_to_html(release_notes)
+        msg_box.setInformativeText(
+            f"<p><b>{self.tr('What is new')}</b></p>"
+            f"<div style=\"max-width: 440px;\">{notes_html}</div>"
+            f"<p>{self.tr('The installer will be verified before it is opened.')}</p>"
+        )
         
         download_btn = msg_box.addButton(self.tr("Yes"), QtWidgets.QMessageBox.ButtonRole.AcceptRole)
         cancel_btn = msg_box.addButton(self.tr("No"), QtWidgets.QMessageBox.ButtonRole.RejectRole)
@@ -492,7 +562,7 @@ class SettingsPage(QtWidgets.QWidget):
         msg_box.exec()
 
         if msg_box.clickedButton() == download_btn:
-            self.start_download(download_url)
+            self.start_download(download_url, checksum)
         elif dotted_ask_btn and msg_box.clickedButton() == dotted_ask_btn:
             settings.setValue("updates/ignored_version", version)
     
@@ -524,14 +594,14 @@ class SettingsPage(QtWidgets.QWidget):
             message
         )
 
-    def start_download(self, url):
+    def start_download(self, url, checksum):
         # Create a progress dialog
         self.update_dialog = QtWidgets.QProgressDialog(self.tr("Downloading update..."), self.tr("Cancel"), 0, 100, self)
         self.update_dialog.setWindowModality(Qt.WindowModality.WindowModal)
         self.update_dialog.show()
         
         filename = url.split("/")[-1]
-        self.update_checker.download_installer(url, filename)
+        self.update_checker.download_installer(url, filename, checksum)
 
     def on_download_progress(self, percent):
         if self.update_dialog:

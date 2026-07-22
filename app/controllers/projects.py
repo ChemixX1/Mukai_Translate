@@ -21,6 +21,13 @@ from app.ui.canvas.text_item import TextBlockItem
 from app.ui.canvas.text.text_item_properties import TextItemProperties
 from app.ui.canvas.save_renderer import ImageSaveRenderer
 from app.ui.export_chapters_dialog import ExportChaptersDialog, ExportChapterRow
+from app.ui.export_quality_dialog import ExportQualityDialog
+from app.export_enhancer import (
+    ExportEnhancementOptions,
+    composite_overlay,
+    enhance_export_background,
+    save_export_image,
+)
 from app.controllers.psd_exporter import PsdPageData, export_psd_pages
 from app.projects.project_state import (
     close_state_store,
@@ -535,6 +542,47 @@ class ProjectController:
         export_plan = self._build_export_plan_for_directory(output_dir, f".{extension}", chapter_names_by_path)
         self._run_export_plan(export_plan)
 
+    def start_export_images(self, page_format: str) -> None:
+        """Export every finished page directly to a PNG/JPG folder."""
+        page_format = str(page_format or "").lower().lstrip(".")
+        if page_format not in {"png", "jpg"} or not self.main.image_files:
+            return
+
+        selected_folder = self._launch_export_folder_dialog(
+            self.main.tr("Export Images"),
+            suggested_name=f"{self._get_export_bundle_name()}_{page_format.upper()}",
+            initial_dir=self._get_default_export_dir(),
+        )
+        if not selected_folder:
+            return
+
+        chapter_names = {
+            row.file_path: row.group_name for row in self._build_export_rows()
+        }
+        groups = self._group_page_indices(chapter_names)
+        export_plan: list[dict] = []
+        used_folder_names: set[str] = set()
+        multiple_groups = len(groups) > 1
+        for group_name, page_indices in groups.items():
+            output_dir = selected_folder
+            if multiple_groups:
+                base = self._sanitize_export_stem(group_name)
+                folder_name = base
+                suffix = 2
+                while folder_name.lower() in used_folder_names:
+                    folder_name = f"{base}_{suffix}"
+                    suffix += 1
+                used_folder_names.add(folder_name.lower())
+                output_dir = os.path.join(selected_folder, folder_name)
+            export_plan.append({
+                "group_name": group_name,
+                "page_indices": page_indices,
+                "output_path": output_dir,
+                "output_kind": "images",
+                "page_format": page_format,
+            })
+        self._run_export_plan(export_plan)
+
     def _save_and_make_internal(
         self,
         output_path: str,
@@ -557,7 +605,25 @@ class ProjectController:
         export_plan = self._build_export_plan(output_path, resolved_chapter_names)
         self._run_export_plan(export_plan)
 
-    def _run_export_plan(self, export_plan: list[dict]) -> None:
+    def _run_export_plan(
+        self,
+        export_plan: list[dict],
+        export_options: dict | None = None,
+    ) -> None:
+        if not export_plan:
+            return
+        if export_options is None:
+            locked_formats = {
+                str(group.get("page_format") or "").lower()
+                for group in export_plan
+                if group.get("page_format")
+            }
+            locked_format = next(iter(locked_formats)) if len(locked_formats) == 1 else None
+            selected_options = self._prompt_for_export_quality(locked_format)
+            if selected_options is None:
+                return
+            export_options = selected_options.to_dict()
+
         self.main.image_ctrl.save_current_image_state()
         all_pages_current_state = self._build_all_pages_current_state()
         self.main.loading.setVisible(True)
@@ -568,7 +634,69 @@ class ProjectController:
             lambda: self.main.loading.setVisible(False),
             export_plan,
             all_pages_current_state,
+            export_options,
         )
+
+    def _prompt_for_export_quality(
+        self,
+        locked_format: str | None = None,
+    ) -> ExportEnhancementOptions | None:
+        sample_size = None
+        if self.main.image_files:
+            try:
+                sample = self.main.load_image(self.main.image_files[0])
+                sample_size = (int(sample.shape[1]), int(sample.shape[0]))
+            except Exception:
+                logger.debug(
+                    "Could not inspect the first page for export estimate.",
+                    exc_info=True,
+                )
+
+        dialog = ExportQualityDialog(
+            initial_options=self._read_export_quality_options(),
+            locked_format=locked_format,
+            sample_size=sample_size,
+            page_count=len(self.main.image_files),
+            parent=self.main,
+        )
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return None
+        options = dialog.export_options()
+        self._write_export_quality_options(options)
+        return options
+
+    @staticmethod
+    def _read_export_quality_options() -> dict:
+        settings = QSettings("ComicLabs", "ComicTranslate")
+        settings.beginGroup("export_quality")
+        options = {
+            "target_long_edge": settings.value("target_long_edge", 0, type=int),
+            "profile": settings.value(
+                "profile",
+                "manga_balanced",
+                type=str,
+            ),
+            "protect_gradients": settings.value(
+                "protect_gradients",
+                True,
+                type=bool,
+            ),
+            "page_format": settings.value("page_format", "png", type=str),
+            "jpeg_quality": settings.value("jpeg_quality", 95, type=int),
+        }
+        settings.endGroup()
+        return options
+
+    @staticmethod
+    def _write_export_quality_options(
+        options: ExportEnhancementOptions,
+    ) -> None:
+        settings = QSettings("ComicLabs", "ComicTranslate")
+        settings.beginGroup("export_quality")
+        for key, value in options.to_dict().items():
+            settings.setValue(key, value)
+        settings.endGroup()
+        settings.sync()
 
     def _prompt_for_partition(
         self,
@@ -823,15 +951,24 @@ class ProjectController:
         return candidate
 
     @staticmethod
-    def _build_export_page_name(page_number: int, file_path: str) -> str:
+    def _build_export_page_name(
+        page_number: int,
+        file_path: str,
+        forced_extension: str | None = None,
+        include_page_number: bool = False,
+    ) -> str:
         # Use the original filename directly
         basename = os.path.basename(file_path)
         # Sanitize the filename to remove any problematic characters
         stem = os.path.splitext(basename)[0]
-        ext = os.path.splitext(basename)[1].lower() or ".png"
+        ext = forced_extension or os.path.splitext(basename)[1].lower() or ".png"
+        if not ext.startswith("."):
+            ext = f".{ext}"
         stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-")
         if not stem:
             stem = f"page_{page_number:04d}"
+        elif include_page_number:
+            stem = f"{page_number:04d}_{stem}"
         return f"{stem}{ext}"
 
     def _build_export_plan(self, output_path: str, chapter_names_by_path: dict[str, str]) -> list[dict]:
@@ -880,7 +1017,13 @@ class ProjectController:
             groups.setdefault(group_name, []).append(page_index)
         return groups
 
-    def save_and_make_worker(self, export_plan: list[dict], all_pages_current_state: dict[str, dict]):
+    def save_and_make_worker(
+        self,
+        export_plan: list[dict],
+        all_pages_current_state: dict[str, dict],
+        export_options: dict | None = None,
+    ):
+        quality_options = ExportEnhancementOptions.from_dict(export_options)
         try:
             if self.main.file_handler.should_pre_materialize(self.main.image_files):
                 count = self.main.file_handler.pre_materialize(self.main.image_files)
@@ -919,11 +1062,50 @@ class ProjectController:
                     else:
                         renderer.add_state_to_image(viewer_state)
 
-                    sv_pth = os.path.join(group_dir, self._build_export_page_name(page_number, file_path))
-                    renderer.save_image(sv_pth)
+                    forced_extension = f".{quality_options.page_format}"
+                    sv_pth = os.path.join(
+                        group_dir,
+                        self._build_export_page_name(
+                            page_number,
+                            file_path,
+                            forced_extension=forced_extension,
+                            include_page_number=group.get("output_kind") == "images",
+                        ),
+                    )
 
-                os.makedirs(os.path.dirname(group["output_path"]) or ".", exist_ok=True)
-                make(group_dir, group["output_path"])
+                    if quality_options.target_long_edge > 0:
+                        # AI restoration is applied to the cleaned background.
+                        # Text and watermark layers are rendered afterwards at
+                        # final resolution to preserve their vector-quality edge.
+                        background_renderer = ImageSaveRenderer(rgb_img)
+                        background_renderer.apply_patches(
+                            self.main.image_patches.get(file_path, [])
+                        )
+                        background = background_renderer.render_background_to_image()
+                        enhanced = enhance_export_background(
+                            background,
+                            quality_options,
+                        )
+                        overlay = renderer.render_overlay_to_image(
+                            (enhanced.shape[1], enhanced.shape[0])
+                        )
+                        final_rgb = composite_overlay(enhanced, overlay)
+                    else:
+                        final_rgb = renderer.render_to_image()
+                    save_export_image(sv_pth, final_rgb, quality_options)
+
+                if group.get("output_kind") == "images":
+                    os.makedirs(group["output_path"], exist_ok=True)
+                    for file_name in os.listdir(group_dir):
+                        source_path = os.path.join(group_dir, file_name)
+                        if os.path.isfile(source_path):
+                            shutil.copy2(
+                                source_path,
+                                os.path.join(group["output_path"], file_name),
+                            )
+                else:
+                    os.makedirs(os.path.dirname(group["output_path"]) or ".", exist_ok=True)
+                    make(group_dir, group["output_path"])
         finally:
             # Clean up temp directory
             shutil.rmtree(temp_dir)
@@ -1395,6 +1577,7 @@ class ProjectController:
         settings.setValue("target_language", self.main.lang_mapping[self.main.t_combo.currentText()])
 
         settings.setValue("mode", "manual" if self.main.manual_radio.isChecked() else "automatic")
+        settings.setValue("force_japanese_ocr", getattr(self.main, "force_japanese_ocr", False))
 
         # Save brush and eraser sizes
         settings.setValue("brush_size", self.main.image_viewer.brush_size)
@@ -1428,6 +1611,15 @@ class ProjectController:
             self.main.automatic_radio.setChecked(True)
             self.main.batch_mode_selected()
 
+        force_japanese_ocr = settings.value("force_japanese_ocr", False, type=bool)
+        self.main.force_japanese_ocr = bool(force_japanese_ocr)
+        if hasattr(self.main, "japanese_ocr_button"):
+            self.main.japanese_ocr_button.blockSignals(True)
+            self.main.japanese_ocr_button.setChecked(self.main.force_japanese_ocr)
+            self.main.japanese_ocr_button.blockSignals(False)
+        if hasattr(self.main, "_set_japanese_ocr_tooltip"):
+            self.main._set_japanese_ocr_tooltip()
+
         # Load brush and eraser sizes
         brush_size = int(settings.value("brush_size", 10))  # Default value is 10
         eraser_size = int(settings.value("eraser_size", 20))  # Default value is 20
@@ -1449,7 +1641,7 @@ class ProjectController:
         # Load text rendering settings
         settings.beginGroup('text_rendering')
         alignment = settings.value('alignment_id', 1, type=int) # Default value is 1 which is Center
-        self.main.alignment_tool_group.set_dayu_checked(alignment)
+        self.main.set_alignment_menu_value(alignment)
 
         saved_font_family = settings.value('font_family', '')
         if saved_font_family:
@@ -1465,15 +1657,37 @@ class ProjectController:
         self.main.block_font_color_button.setStyleSheet(f"background-color: {color}; border: none; border-radius: 5px;")
         self.main.block_font_color_button.setProperty('selected_color', color)
         self.main.settings_page.ui.uppercase_checkbox.setChecked(settings.value('upper_case', False, type=bool))
-        self.main.outline_checkbox.setChecked(settings.value('outline', True, type=bool))
+        # Outline is intentionally opt-in on every fresh application session.
+        # Individual existing text boxes still restore their own outline when
+        # selected, but newly rendered text starts without one.
+        self.main.outline_checkbox.setChecked(False)
+        settings.setValue('outline', False)
 
         self.main.line_spacing_dropdown.setCurrentText(settings.value('line_spacing', '1.0'))
         self.main.outline_width_dropdown.setCurrentText(settings.value('outline_width', '1.0'))
-        outline_color = settings.value('outline_color', '#FFFFFF')
+        outline_color = settings.value('outline_color', '#000000')
         self.main.outline_font_color_button.setStyleSheet(f"background-color: {outline_color}; border: none; border-radius: 5px;")
         self.main.outline_font_color_button.setProperty('selected_color', outline_color)
+        if hasattr(self.main, "_sync_outline_toolbar_button"):
+            self.main._sync_outline_toolbar_button(
+                self.main.outline_checkbox.isChecked()
+            )
+        if hasattr(self.main, "refresh_outline_toolbar_button"):
+            self.main.refresh_outline_toolbar_button()
+        if hasattr(self.main, "set_outline_inspector_values"):
+            self.main.set_outline_inspector_values(
+                outline_color,
+                self.main.outline_width_dropdown.currentText(),
+            )
 
-        self.main.bold_button.setChecked(settings.value('bold', False, type=bool))
+        # Font weight is also opt-in for each fresh application session.
+        # Selecting an already-bold text box will still reflect that box's
+        # actual weight in the contextual toolbar.
+        saved_bold = False
+        settings.setValue('bold', False)
+        self.main.bold_button.setChecked(False)
+        if hasattr(self.main, "set_font_weight_menu_value"):
+            self.main.set_font_weight_menu_value(400)
         self.main.italic_button.setChecked(settings.value('italic', False, type=bool))
         self.main.underline_button.setChecked(settings.value('underline', False, type=bool))
         settings.endGroup()

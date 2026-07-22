@@ -107,6 +107,8 @@ class QssTemplate(string.Template):
 
 class MTheme(object):
     blue = "#1890ff"
+    mukai_dark_blue = "#168FF7"
+    mukai_light_pink = "#D13655"
     purple = "#722ed1"
     cyan = "#13c2c2"
     green = "#52c41a"
@@ -150,14 +152,16 @@ class MTheme(object):
         self.font_unit = "pt"
 
         self.text_error_color = self.error_7
-        self.text_color_inverse = "#fff"
         self.text_warning_color = self.warning_7
 
     def set_theme(self, theme):
         if theme == "light":
             self._light()
+        elif theme == "black":
+            self._black()
         else:
             self._dark()
+        self.text_color_inverse = "#0B0F19" if theme == "black" else "#fff"
         self._init_icon(theme)
 
     def set_primary_color(self, color):
@@ -201,10 +205,11 @@ class MTheme(object):
         self.icon_float = url_prefix.format("float")
         self.icon_size_grip = url_prefix.format("size_grip")
 
-        self.icon_check = url_prefix_2.format("check")
-        self.icon_minus = url_prefix_2.format("minus")
-        self.icon_circle = url_prefix_2.format("circle")
-        self.icon_sphere = url_prefix_2.format("sphere")
+        icon_variant = "_black" if theme == "black" else ""
+        self.icon_check = url_prefix_2.format(f"check{icon_variant}")
+        self.icon_minus = url_prefix_2.format(f"minus{icon_variant}")
+        self.icon_circle = url_prefix_2.format(f"circle{icon_variant}")
+        self.icon_sphere = url_prefix_2.format(f"sphere{icon_variant}")
 
     def _init_color(self):
         self.info_color = self.blue
@@ -278,21 +283,38 @@ class MTheme(object):
             return get_theme_size().get(item, 0)
 
     def _dark(self):
-        self.title_color = "#ffffff"
-        self.primary_text_color = "#d9d9d9"
-        self.secondary_text_color = "#a6a6a6"
-        self.disable_color = "#737373"
-        self.border_color = "#1e1e1e"
-        self.divider_color = "#262626"
-        self.header_color = "#0a0a0a"
-        self.icon_color = "#a6a6a6"
+        self.title_color = "#F5F7FA"
+        self.primary_text_color = "#F5F7FA"
+        self.secondary_text_color = "#AAB4C1"
+        self.disable_color = "#667386"
+        self.border_color = "#1D2430"
+        self.divider_color = "#1D2430"
+        self.header_color = "#0F141D"
+        self.icon_color = "#AAB4C1"
 
-        self.background_color = "#323232"
-        self.background_selected_color = "#292929"
-        self.background_in_color = "#3a3a3a"
-        self.background_out_color = "#494949"
+        self.background_color = "#0B0F19"
+        self.background_selected_color = "#1A314F"
+        self.background_in_color = "#161C27"
+        self.background_out_color = "#111722"
         self.mask_color = utils.fade_color(self.background_color, "90%")
-        self.toast_color = "#555555"
+        self.toast_color = "#141A25"
+
+    def _black(self):
+        self.title_color = "#FFFFFF"
+        self.primary_text_color = "#F5F5F5"
+        self.secondary_text_color = "#B8B8B8"
+        self.disable_color = "#606060"
+        self.border_color = "#262626"
+        self.divider_color = "#1F1F1F"
+        self.header_color = "#000000"
+        self.icon_color = "#C7C7C7"
+
+        self.background_color = "#000000"
+        self.background_selected_color = "#242424"
+        self.background_in_color = "#111111"
+        self.background_out_color = "#0A0A0A"
+        self.mask_color = utils.fade_color(self.background_color, "90%")
+        self.toast_color = "#171717"
 
     def _light(self):
         self.title_color = "#262626"

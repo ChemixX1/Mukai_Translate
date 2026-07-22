@@ -53,6 +53,7 @@ class InpaintModel:
         ...
 
     def _pad_forward(self, image, mask, config: Config):
+        output_dtype = image.dtype
         origin_height, origin_width = image.shape[:2]
         pad_image = pad_img_to_modulo(
             image, mod=self.pad_mod, square=self.pad_to_square, min_size=self.min_size
@@ -70,7 +71,10 @@ class InpaintModel:
 
         mask = mask[:, :, np.newaxis]
         result = result * (mask / 255) + image * (1 - (mask / 255))
-        return result
+        if np.issubdtype(output_dtype, np.integer):
+            limits = np.iinfo(output_dtype)
+            result = np.clip(np.rint(result), limits.min, limits.max)
+        return result.astype(output_dtype, copy=False)
 
     def forward_post_process(self, result, image, mask, config):
         return result, image, mask

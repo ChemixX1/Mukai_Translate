@@ -51,7 +51,7 @@ class GPTTranslation(BaseLLMTranslation):
             "Authorization": f"Bearer {self.api_key}"
         }
         
-        if self.supports_images and self.img_as_llm_input:
+        if self.supports_images and self.img_as_llm_input and image is not None:
             # Use the base class method to encode the image
             encoded_image, mime_type = self.encode_image(image)
             

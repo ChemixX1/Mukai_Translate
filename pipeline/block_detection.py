@@ -3,6 +3,7 @@ from typing import List
 from PySide6 import QtCore
 
 from modules.detection.processor import TextBlockDetector
+from modules.ocr.processor import force_japanese_ocr_enabled
 from modules.utils.textblock import TextBlock, sort_blk_list
 from modules.rendering.render import get_best_render_area
 from pipeline.webtoon_utils import get_first_visible_block
@@ -164,7 +165,11 @@ class BlockDetectionHandler:
             self.main_page.blk_list = blk_list
         
         source_lang = self.main_page.s_combo.currentText()
-        source_lang_english = self.main_page.lang_mapping.get(source_lang, source_lang)
+        source_lang_english = (
+            "Japanese"
+            if force_japanese_ocr_enabled(self.main_page)
+            else self.main_page.lang_mapping.get(source_lang, source_lang)
+        )
         rtl = True if source_lang_english == 'Japanese' else False
         self.main_page.blk_list = sort_blk_list(self.main_page.blk_list, rtl)
 

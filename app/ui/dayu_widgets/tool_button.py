@@ -42,7 +42,9 @@ class MToolButton(QtWidgets.QToolButton):
     @QtCore.Slot(bool)
     def _polish_icon(self, checked=None):
         if self._dayu_svg:
-            if self.isCheckable() and self.isChecked():
+            if self.property("neutralCheckVisual"):
+                self.setIcon(MIcon(self._dayu_svg))
+            elif self.isCheckable() and self.isChecked():
                 self.setIcon(MIcon(self._dayu_svg, dayu_theme.primary_color))
             else:
                 self.setIcon(MIcon(self._dayu_svg))

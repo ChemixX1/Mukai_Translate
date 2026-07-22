@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 
 block_cipher = None
 
@@ -17,8 +17,12 @@ datas += collect_data_files('mahotas')
 # App resources
 datas += [
     ('resources', 'resources'),
-    ('app',       'app'),
-    ('modules',   'modules'),
+    ('NOTICE', 'docs'),
+    ('docs/THIRD_PARTY_NOTICES.md', 'docs'),
+    # The optional SAM runner executes inside its isolated sidecar Python.
+    # Application packages remain inside PyInstaller's bytecode archive and
+    # are not copied as plain source into customer installations.
+    ('app/sam_refiner_runner.py', 'app'),
 ]
 
 # Hidden imports that PyInstaller may miss
@@ -30,18 +34,23 @@ hiddenimports = [
     'PySide6.QtNetwork',
     'PySide6.QtPrintSupport',
     'PySide6.QtSvg',
+    'PySide6.QtMultimedia',
     # onnxruntime providers
     'onnxruntime.capi.onnxruntime_pybind11_state',
     # app modules
     'controller',
     'comic',
+    'app.production_self_test',
     'app.ui.splash_screen',
     # misc
     'keyring.backends.Windows',
     'keyring.backends.fail',
     'pkg_resources',
     'PIL._tkinter_finder',
+    # High-quality text envelope interpolation (headless: PySide owns the UI).
+    'cv2',
 ]
+hiddenimports += collect_submodules('winrt')
 
 a = Analysis(
     ['mukai.py'],
@@ -80,7 +89,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon='resources/icons/icon.ico',
-    version=None,
+    version='build/windows-version-info.txt',
 )
 
 coll = COLLECT(

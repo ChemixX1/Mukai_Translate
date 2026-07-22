@@ -58,15 +58,19 @@ uv pip install onnxruntime-gpu
 ```
 
 ## Usage
-Simply run the included batch file to start Mukai-Translator:
-```bash
-Iniciar-Mukai.bat
+For local development on Windows, run the source-aware launcher from the project root:
+```text
+MukaiTranslator-Developer.exe
 ```
+It uses the existing `.venv` and always opens the current source code, so normal code changes do not require reinstalling the application. Initial environment setup is handled by `tools\setup_development.ps1`.
+
 Alternatively, from the command line:
 ```bash
 uv run comic.py
 ```
 This will launch the modern GUI.
+
+For customer distribution and signed updates, see [docs/PRODUCCION.md](docs/PRODUCCION.md). Do not share the source folder with end users; share the versioned installer created under `releases\<version>`.
 
 ### Tips
 * If you have a CBR file, you'll need to install Winrar or 7-Zip then add the folder it's installed to (e.g "C:\Program Files\WinRAR" for Windows) to Path.
@@ -111,3 +115,11 @@ Wrapped text in bounding boxes obtained from bubbles and text.
 * PaddleOCR
 * RapidOCR
 * dayu_widgets
+* ComfyUI_LayerStyle (MIT; adapted mask-based layer effects, without the ComfyUI/Torch runtime)
+
+## License and attribution
+
+Mukai Translator is distributed under the [Apache License 2.0](LICENSE).
+Redistributions and derivative works that use the Mukai Translator
+modifications must retain the project [NOTICE](NOTICE) and its attribution to
+ChemixX1, together with all applicable third-party notices.

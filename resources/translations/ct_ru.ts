@@ -476,8 +476,8 @@
     </message>
     <message>
         <location filename="../../app/ui/messages.py" line="11" />
-        <source>Comic has been Translated!</source>
-        <translation>Комикс переведен!</translation>
+        <source>Manga has been translated successfully.</source>
+        <translation>Манга успешно переведена.</translation>
     </message>
     <message>
         <location filename="../../app/ui/messages.py" line="23" />

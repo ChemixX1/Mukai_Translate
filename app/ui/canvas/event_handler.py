@@ -5,6 +5,7 @@ from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsPathItem
 
 from .text_item import TextBlockItem, TextBlockState
 from .rectangle import MoveableRectItem, RectState
+from .watermark_item import WatermarkItem
 
 
 class EventHandler:
@@ -13,14 +14,56 @@ class EventHandler:
     def __init__(self, viewer):
         self.viewer = viewer
         self.dragged_item = None
+        self.watermark_item = None
+        self.watermark_mode = None
+        self.watermark_start_pos = None
+        self.watermark_start_scale = None
         self.last_scene_pos = None
     
     # Main Event Handlers
 
     def handle_mouse_press(self, event: QtGui.QMouseEvent):
         scene_pos = self.viewer.mapToScene(event.position().toPoint())
+
+        # Region-based watermark cleanup: draw one rectangle, then let the
+        # controller inpaint only that chosen area. Right-click cancels it.
+        if self.viewer.is_selecting_watermark_cleanup():
+            if event.button() == Qt.LeftButton and self._is_on_image(scene_pos):
+                self.viewer.begin_watermark_cleanup_selection(scene_pos)
+            elif event.button() == Qt.RightButton:
+                self.viewer.cancel_watermark_cleanup_selection()
+            return
+
+        # Watermark placement mode: left-click stamps it, right-click cancels.
+        if self.viewer.is_placing_watermark:
+            if event.button() == Qt.LeftButton:
+                if self._is_on_image(scene_pos):
+                    self.viewer.finalize_watermark_placement(scene_pos)
+                    self.viewer.watermark_stamped.emit()
+            elif event.button() == Qt.RightButton:
+                self.viewer.cancel_watermark_placement()
+            return
+
         clicked_item = self._resolve_top_level_item(self.viewer.itemAt(event.pos()))
         ctrl_pressed = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+
+        if self.viewer.style_paint_active:
+            if event.button() == Qt.RightButton:
+                self.viewer.cancel_style_paint()
+                event.accept()
+                return
+            if event.button() == Qt.LeftButton:
+                if isinstance(clicked_item, TextBlockItem):
+                    self.viewer.style_paint_target_requested.emit(clicked_item)
+                    event.accept()
+                    return
+                # A click on the page cancels painting and continues through
+                # normal deselection so the source box is also cleared.
+                self.viewer.cancel_style_paint()
+
+        if isinstance(clicked_item, WatermarkItem):
+            self._press_handle_watermark(event, clicked_item, scene_pos, ctrl_pressed)
+            return
         
         # Delegate page change detection to the appropriate manager
         if self.viewer.webtoon_mode:
@@ -78,7 +121,7 @@ class EventHandler:
             # Order is important: check for handles, then drag, then general deselection
             if self._press_handle_resize(event, scene_pos): return
             if self._press_handle_rotation(event, scene_pos): return
-            if self._press_handle_drag(event, scene_pos): return
+            if self._press_handle_drag(event, scene_pos, clicked_item): return
             self._press_handle_deselection(clicked_item, ctrl_pressed)
 
             if self.viewer.current_tool == 'box' and not isinstance(clicked_item, (TextBlockItem, MoveableRectItem)):
@@ -106,6 +149,20 @@ class EventHandler:
     
     def handle_mouse_move(self, event: QtGui.QMouseEvent):
         scene_pos = self.viewer.mapToScene(event.position().toPoint())
+
+        if self.viewer.is_selecting_watermark_cleanup():
+            self.viewer.update_watermark_cleanup_selection(scene_pos)
+            return
+
+        # Watermark placement mode: the preview follows the cursor.
+        if self.viewer.is_placing_watermark:
+            self.viewer.update_watermark_placement(scene_pos)
+            return
+
+        # Explicitly handle dragging our items first
+        if self._move_handle_watermark(event, scene_pos):
+            self.last_scene_pos = scene_pos
+            return
 
         # Explicitly handle dragging our items first
         if self._move_handle_drag(event, scene_pos):
@@ -135,7 +192,16 @@ class EventHandler:
     def handle_mouse_release(self, event: QtGui.QMouseEvent):
         interaction_finished = False # Flag to track if we handled the event
 
+        if self.viewer.is_selecting_watermark_cleanup():
+            if event.button() == Qt.LeftButton:
+                self.viewer.finish_watermark_cleanup_selection()
+            return
+
         if event.button() == Qt.LeftButton:
+            if self._release_handle_watermark():
+                self.viewer.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+                return
+
             interaction_finished = self._release_handle_item_interaction()
 
             # If a custom drag, resize, or rotate was just finished, stop the event here
@@ -213,10 +279,10 @@ class EventHandler:
     # Event Handler Helpers 
 
     def _resolve_top_level_item(self, item):
-        """Walk up the parent chain to find a top-level TextBlockItem, MoveableRectItem, or QGraphicsPathItem."""
+        """Walk up the parent chain to find a top-level interactive scene item."""
         cur = item
         while cur is not None and not isinstance(
-            cur, (TextBlockItem, MoveableRectItem, QGraphicsPixmapItem, QGraphicsPathItem)):
+            cur, (TextBlockItem, MoveableRectItem, WatermarkItem, QGraphicsPixmapItem, QGraphicsPathItem)):
             cur = cur.parentItem()
         return cur
 
@@ -225,7 +291,12 @@ class EventHandler:
             return any(item.contains(item.mapFromScene(scene_pos)) for item in self.viewer.webtoon_manager.image_items.values())
         return self.viewer.photo.contains(scene_pos)
     
-    def _press_handle_drag(self, event: QtGui.QMouseEvent, scene_pos: QPointF) -> bool:
+    def _press_handle_drag(
+        self,
+        event: QtGui.QMouseEvent,
+        scene_pos: QPointF,
+        clicked_item=None,
+    ) -> bool:
         """Checks if a drag should be initiated on a custom item."""
         blk_item, rect_item = self.viewer.sel_rot_item()
         sel_item = blk_item or rect_item
@@ -234,6 +305,12 @@ class EventHandler:
             return False
 
         if not sel_item:
+            return False
+
+        # A selected text box can have a bounding rectangle larger than its
+        # visible glyphs. Do not let that invisible area consume a click on
+        # the manga image; that click must deselect the box immediately.
+        if clicked_item is not sel_item:
             return False
 
         local_pos = sel_item.mapFromScene(scene_pos)
@@ -252,6 +329,67 @@ class EventHandler:
             return True
 
         return False
+
+    def _press_handle_watermark(self, event: QtGui.QMouseEvent, item: WatermarkItem, scene_pos: QPointF, ctrl_pressed: bool):
+        self.viewer.setFocus(Qt.FocusReason.MouseFocusReason)
+        if not ctrl_pressed:
+            self.viewer.select_watermark(item)
+        else:
+            item.setSelected(not item.isSelected())
+            if item.isSelected():
+                item.setFocus(Qt.FocusReason.MouseFocusReason)
+
+        if event.button() == Qt.RightButton:
+            item.show_context_menu(self.viewer.viewport().mapToGlobal(event.position().toPoint()), self.viewer)
+            event.accept()
+            return
+
+        if event.button() != Qt.LeftButton or not item.isSelected():
+            event.accept()
+            return
+
+        self.watermark_item = item
+        self.watermark_start_pos = item.pos()
+        self.watermark_start_scale = item.scale()
+        self.last_scene_pos = scene_pos
+        if item.is_resize_handle_at(scene_pos):
+            self.watermark_mode = "resize"
+            item.init_resize(scene_pos)
+            self.viewer.viewport().setCursor(Qt.CursorShape.SizeFDiagCursor)
+        else:
+            self.watermark_mode = "move"
+            self.viewer.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+        event.accept()
+
+    def _move_handle_watermark(self, event: QtGui.QMouseEvent, scene_pos: QPointF) -> bool:
+        item = self.watermark_item
+        if item is None or self.watermark_mode is None:
+            return False
+
+        if self.watermark_mode == "resize":
+            item.resize_from_scene(scene_pos)
+        elif self.watermark_mode == "move":
+            last_scene_pos = self.last_scene_pos if self.last_scene_pos is not None else scene_pos
+            item.move_by_scene_delta(scene_pos - last_scene_pos)
+        event.accept()
+        return True
+
+    def _release_handle_watermark(self) -> bool:
+        item = self.watermark_item
+        if item is None:
+            return False
+
+        changed = (
+            self.watermark_start_pos is not None
+            and (item.pos() != self.watermark_start_pos or abs(item.scale() - (self.watermark_start_scale or item.scale())) > 0.0001)
+        )
+        self.watermark_item = None
+        self.watermark_mode = None
+        self.watermark_start_pos = None
+        self.watermark_start_scale = None
+        if changed:
+            item._notify_changed()
+        return True
 
     def _press_handle_resize(self, event, scene_pos) -> bool:
         blk_item, rect_item = self.viewer.sel_rot_item()
@@ -306,8 +444,11 @@ class EventHandler:
 
     def _press_handle_deselection(self, clicked_item, ctrl_pressed: bool = False):
         if clicked_item is None or isinstance(clicked_item, QGraphicsPixmapItem):
-            self.viewer.clear_text_edits.emit()
             self.viewer.deselect_all()
+            self.viewer.deselect_watermarks()
+            # Emit after every item's selected flag has been cleared so the
+            # inspector cannot repopulate itself from a selection in transit.
+            self.viewer.clear_text_edits.emit()
         elif isinstance(clicked_item, QGraphicsPathItem):
             # When clicking on a path item (brush stroke/segmentation), only deselect other items
             # but don't clear text edits or call deselect_all
@@ -317,6 +458,7 @@ class EventHandler:
                         item.handleDeselection()
                     else: 
                         self.viewer.deselect_rect(item)
+            self.viewer.deselect_watermarks()
         elif not ctrl_pressed:
             for item in self.viewer._scene.items():
                 if isinstance(item, (TextBlockItem, MoveableRectItem)) and item != clicked_item:
@@ -324,6 +466,7 @@ class EventHandler:
                         item.handleDeselection()
                     else: 
                         self.viewer.deselect_rect(item)
+            self.viewer.deselect_watermarks()
 
     def _press_handle_pan(self, event):
         self.viewer.panning = True

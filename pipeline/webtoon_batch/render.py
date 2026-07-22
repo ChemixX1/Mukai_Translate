@@ -140,6 +140,18 @@ class RenderMixin:
             if is_no_space_lang(target_lang_code):
                 wrapped_translation = wrapped_translation.replace(" ", "")
 
+            # Store re-flowable content (single paragraph + pinned width) so the box
+            # re-wraps when its width changes instead of keeping baked-in line breaks.
+            reflow_text = wrapped_translation
+            fixed_wrap = None
+            if not vertical and not is_no_space_lang(target_lang_code):
+                unwrapped = " ".join(
+                    part for part in wrapped_translation.split("\n") if part != ""
+                )
+                if unwrapped and unwrapped != wrapped_translation:
+                    reflow_text = unwrapped
+                    fixed_wrap = rendered_width
+
             font_color = get_smart_text_color(block.font_color, base_font_color)
             if should_emit_live:
                 render_block = block.deep_copy()
@@ -156,7 +168,7 @@ class RenderMixin:
                 )
 
             text_props = TextItemProperties(
-                text=wrapped_translation,
+                text=reflow_text,
                 font_family=font,
                 font_size=font_size,
                 text_color=font_color,
@@ -175,10 +187,11 @@ class RenderMixin:
                 height=rendered_height,
                 direction=direction,
                 vertical=vertical,
+                fixed_wrap_width=fixed_wrap,
                 selection_outlines=[
                     OutlineInfo(
                         0,
-                        len(wrapped_translation),
+                        len(reflow_text),
                         outline_color,
                         outline_width,
                         OutlineType.Full_Document,

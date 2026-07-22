@@ -6,6 +6,7 @@ import imkit as imk
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QBrush
 
+from app.sam_mask_refiner import SAMMaskRefiner
 from modules.utils.device import resolve_device
 from modules.utils.pipeline_config import inpaint_map, get_config, get_inpainter_backend
 
@@ -19,6 +20,9 @@ class InpaintingHandler:
         self.main_page = main_page
         self.inpainter_cache = None
         self.cached_inpainter_key = None
+        # SAM is strictly a mask helper.  It never replaces the configured
+        # LaMa, AOT or MI-GAN engine below.
+        self.sam_mask_refiner = SAMMaskRefiner()
 
     def _ensure_inpainter(self):
         settings_page = self.main_page.settings_page
@@ -56,6 +60,27 @@ class InpaintingHandler:
         inpaint_input_img = imk.convert_scale_abs(inpaint_input_img) 
 
         return inpaint_input_img
+
+    def magic_eraser_inpaint(self):
+        """Run SAM over the painted mask, then inpaint with the selected engine."""
+        image_viewer = self.main_page.image_viewer
+        settings_page = self.main_page.settings_page
+        rough_mask = image_viewer.get_mask_for_inpainting()
+
+        if self.main_page.webtoon_mode:
+            image, _mappings = image_viewer.get_visible_area_image()
+        else:
+            image = image_viewer.get_image_array()
+
+        if image is None or rough_mask is None:
+            return []
+
+        refined_mask = self.sam_mask_refiner.refine(image, rough_mask)
+        self._ensure_inpainter()
+        config = get_config(settings_page)
+        inpainted_image = self.inpainter_cache(image, refined_mask, config)
+        inpainted_image = imk.convert_scale_abs(inpainted_image)
+        return self.get_inpainted_patches(refined_mask, inpainted_image)
 
     def _qimage_to_np(self, qimg: QImage):
         if qimg.width() <= 0 or qimg.height() <= 0:
@@ -135,6 +160,46 @@ class InpaintingHandler:
         inpainted = self.inpainter_cache(image, mask, config)
         inpainted = imk.convert_scale_abs(inpainted)
         return self._get_regular_patches(mask, inpainted)
+
+    def inpaint_region(self, image: np.ndarray, region: tuple[int, int, int, int]) -> list[dict]:
+        """Inpaint exactly one user-selected rectangular region.
+
+        A small surrounding crop gives the model visual context, while the
+        returned patch is clipped back to the selection. This prevents an
+        accidental selection from modifying any neighbouring manga art.
+        """
+        if image is None or image.ndim < 2:
+            return []
+
+        image_height, image_width = image.shape[:2]
+        x, y, width, height = (int(value) for value in region)
+        x = max(0, min(x, image_width))
+        y = max(0, min(y, image_height))
+        width = max(0, min(width, image_width - x))
+        height = max(0, min(height, image_height - y))
+        if width < 1 or height < 1:
+            return []
+
+        # Crop instead of processing the full page: it is much faster for a
+        # watermark and lets the selected area remain the only affected area.
+        context = max(32, min(128, int(max(width, height) * 0.35)))
+        crop_x1 = max(0, x - context)
+        crop_y1 = max(0, y - context)
+        crop_x2 = min(image_width, x + width + context)
+        crop_y2 = min(image_height, y + height + context)
+        crop = image[crop_y1:crop_y2, crop_x1:crop_x2].copy()
+
+        mask = np.zeros(crop.shape[:2], dtype=np.uint8)
+        local_x = x - crop_x1
+        local_y = y - crop_y1
+        mask[local_y:local_y + height, local_x:local_x + width] = 255
+
+        self._ensure_inpainter()
+        config = get_config(self.main_page.settings_page)
+        inpainted = self.inpainter_cache(crop, mask, config)
+        inpainted = imk.convert_scale_abs(inpainted)
+        patch = inpainted[local_y:local_y + height, local_x:local_x + width].copy()
+        return [{'bbox': [x, y, width, height], 'image': patch}]
 
     def inpaint_complete(self, patch_list):
         # Handle webtoon mode vs regular mode

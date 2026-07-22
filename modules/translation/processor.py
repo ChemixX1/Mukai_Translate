@@ -1,5 +1,10 @@
 import numpy as np
 
+from app.glossary import append_glossary_context, apply_glossary_to_blocks
+from app.onomatopoeia import (
+    append_onomatopoeia_context,
+    refine_untranslated_onomatopoeias,
+)
 from ..utils.textblock import TextBlock
 from .base import LLMTranslation
 from .factory import TranslationFactory
@@ -94,9 +99,31 @@ class Translator:
         Returns:
             List of updated TextBlock objects with translations
         """
+        effective_context = self.prepare_context(blk_list, extra_context)
         if self.is_llm_engine:
             # LLM translators need image and extra context
-            return self.engine.translate(blk_list, image, extra_context)
+            translated_blocks = self.engine.translate(blk_list, image, effective_context)
         else:
             # Text-based translators only need the text blocks
-            return self.engine.translate(blk_list)
+            translated_blocks = self.engine.translate(blk_list)
+        translated_blocks = refine_untranslated_onomatopoeias(
+            translated_blocks,
+            self.target_lang_en,
+            self.main_page,
+        )
+        return apply_glossary_to_blocks(translated_blocks)
+
+    def prepare_context(
+        self,
+        blk_list: list[TextBlock],
+        extra_context: str = "",
+    ) -> str:
+        """Build optional orchestration context without changing an engine."""
+        effective_context = append_glossary_context(extra_context)
+        return append_onomatopoeia_context(
+            effective_context,
+            blk_list,
+            self.source_lang_en,
+            self.target_lang_en,
+            self.main_page,
+        )

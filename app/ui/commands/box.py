@@ -184,13 +184,19 @@ class DeleteBoxesCommand(QUndoCommand, RectCommandBase):
         self.scene = self.viewer._scene
         self.rect_properties = self.save_rect_properties(rect_item) if rect_item else None
         self.txt_item_prp = self.save_txt_item_properties(text_item) if text_item else None
-        self.blk_properties = self.save_blk_properties(blk)
+        # Text boxes created with the quick "Add text box" tool are valid
+        # scene items even though they do not have an OCR TextBlock.  Keep the
+        # block optional so Delete/Backspace can remove those boxes too.
+        self.blk_properties = self.save_blk_properties(blk) if blk is not None else None
         self.blk_list = blk_list
 
     def redo(self):
         matching_rect = self.find_matching_rect(self.scene, self.rect_properties) if self.rect_properties else None
         matching_txt_item = self.find_matching_txt_item(self.scene, self.txt_item_prp) if self.txt_item_prp else None
-        matching_blk = self.find_matching_blk(self.blk_list, self.blk_properties)
+        matching_blk = (
+            self.find_matching_blk(self.blk_list, self.blk_properties)
+            if self.blk_properties is not None else None
+        )
 
         if matching_rect:
             self.scene.removeItem(matching_rect)
@@ -213,7 +219,10 @@ class DeleteBoxesCommand(QUndoCommand, RectCommandBase):
             self.create_rect_item(self.rect_properties, self.viewer)
             self.scene.update()
 
-        if not self.find_matching_blk(self.blk_list, self.blk_properties):
+        if (
+            self.blk_properties is not None
+            and not self.find_matching_blk(self.blk_list, self.blk_properties)
+        ):
             blk = self.create_new_blk(self.blk_properties)
             self.blk_list.append(blk)
 

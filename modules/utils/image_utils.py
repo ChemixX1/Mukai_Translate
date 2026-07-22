@@ -39,6 +39,99 @@ def get_smart_text_color(detected_rgb: tuple, setting_color: QColor) -> QColor:
 
     return setting_color
 
+
+def _resolve_block_crop_bounds(
+    img: np.ndarray,
+    blk: TextBlock,
+    default_padding: int,
+) -> tuple[int, int, int, int]:
+    """Use the wider bubble-aware crop introduced by upstream 2.8.5."""
+    from modules.utils.textblock import adjust_text_line_coordinates
+
+    cx1, cy1, cx2, cy2 = adjust_text_line_coordinates(blk.xyxy, 10, 10, img)
+    bubble_xyxy = getattr(blk, "bubble_xyxy", None)
+    if getattr(blk, "text_class", None) != "text_bubble" or bubble_xyxy is None or len(bubble_xyxy) < 4:
+        return cx1, cy1, cx2, cy2
+
+    bx1, by1, bx2, by2 = [int(v) for v in bubble_xyxy[:4]]
+    bubble_margin = max(4, min(default_padding + 3, 12))
+    bubble_inset_y = max(2, min(default_padding + 1, 8))
+    return (
+        min(cx1, max(0, bx1 - bubble_margin)),
+        min(cy1, max(0, by1 + bubble_inset_y)),
+        max(cx2, min(img.shape[1], bx2 + bubble_margin)),
+        max(cy2, min(img.shape[0], by2 - bubble_inset_y)),
+    )
+
+
+def _clip_mask_to_bubble_ellipse(
+    mask: np.ndarray,
+    bounds: tuple[int, int, int, int],
+    bubble_xyxy,
+    inset: int,
+) -> np.ndarray:
+    """Conservative fallback matching upstream's bubble ellipse boundary."""
+    x1, y1, x2, y2 = bounds
+    bx1, by1, bx2, by2 = [float(v) for v in bubble_xyxy[:4]]
+    bx1_rel = max(0.0, bx1 - x1 + inset)
+    by1_rel = max(0.0, by1 - y1 + inset)
+    bx2_rel = min(float(x2 - x1), bx2 - x1 - inset)
+    by2_rel = min(float(y2 - y1), by2 - y1 - inset)
+    if bx2_rel <= bx1_rel or by2_rel <= by1_rel:
+        return mask
+
+    yy, xx = np.ogrid[: mask.shape[0], : mask.shape[1]]
+    center_x = (bx1_rel + bx2_rel) / 2.0
+    center_y = (by1_rel + by2_rel) / 2.0
+    radius_x = max(1.0, (bx2_rel - bx1_rel) / 2.0)
+    radius_y = max(1.0, (by2_rel - by1_rel) / 2.0)
+    bubble_clip = (((xx - center_x) / radius_x) ** 2 + ((yy - center_y) / radius_y) ** 2) <= 1.0
+    return np.where(bubble_clip, mask, 0).astype(mask.dtype, copy=False)
+
+
+def build_block_mask_data(
+    img: np.ndarray,
+    blk: TextBlock,
+    default_padding: int = 5,
+    require_text_or_translation: bool = True,
+    clip_to_bubble: bool = True,
+) -> tuple[np.ndarray | None, tuple[int, int, int, int] | None]:
+    """Build a pixel-accurate text mask, retaining the legacy mask as fallback."""
+    from modules.detection.utils.content import detect_content_mask_in_bbox
+
+    if require_text_or_translation and not blk.text and not blk.translation:
+        return None, None
+
+    cx1, cy1, cx2, cy2 = _resolve_block_crop_bounds(img, blk, default_padding)
+    crop = img[cy1:cy2, cx1:cx2]
+    if crop.size == 0:
+        return None, None
+
+    crop_mask = detect_content_mask_in_bbox(crop)
+    if crop_mask is None or not np.any(crop_mask):
+        return None, None
+
+    close_kernel = imk.get_structuring_element(imk.MORPH_RECT, (3, 3))
+    crop_mask = imk.morphology_ex(crop_mask, imk.MORPH_CLOSE, close_kernel)
+    kernel_size = max(1, int(default_padding))
+    dilated = imk.dilate(
+        crop_mask,
+        np.ones((kernel_size, kernel_size), np.uint8),
+        iterations=3,
+    )
+    if (
+        clip_to_bubble
+        and getattr(blk, "text_class", None) == "text_bubble"
+        and getattr(blk, "bubble_xyxy", None) is not None
+    ):
+        dilated = _clip_mask_to_bubble_ellipse(
+            dilated,
+            (cx1, cy1, cx2, cy2),
+            blk.bubble_xyxy,
+            inset=max(1, kernel_size),
+        )
+    return dilated, (cx1, cy1, cx2, cy2)
+
 def generate_mask(img: np.ndarray, blk_list: list[TextBlock], default_padding: int = 5) -> np.ndarray:
     """
     Generate a mask by fitting a merged shape around each block's inpaint bboxes,
@@ -51,6 +144,19 @@ def generate_mask(img: np.ndarray, blk_list: list[TextBlock], default_padding: i
     for blk in blk_list:
         # Skip blocks with no text and no translation
         if not blk.text and not blk.translation:
+            continue
+
+        # Prefer the pixel-accurate 2.8.5 segmentation. If the content detector
+        # cannot obtain a reliable mask, keep Mukai's existing bbox algorithm.
+        pixel_mask, pixel_bounds = build_block_mask_data(
+            img,
+            blk,
+            default_padding=default_padding,
+            clip_to_bubble=True,
+        )
+        if pixel_mask is not None and pixel_bounds is not None and np.any(pixel_mask):
+            cx1, cy1, cx2, cy2 = pixel_bounds
+            mask[cy1:cy2, cx1:cx2] = np.bitwise_or(mask[cy1:cy2, cx1:cx2], pixel_mask)
             continue
         
         bboxes = get_inpaint_bboxes(blk.xyxy, img)

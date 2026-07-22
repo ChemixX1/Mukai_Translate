@@ -6,6 +6,24 @@ from ..utils.language_utils import language_codes
 from .factory import OCRFactory
 
 
+def force_japanese_ocr_enabled(main_page: Any) -> bool:
+    button = getattr(main_page, "japanese_ocr_button", None)
+    return bool(
+        getattr(main_page, "force_japanese_ocr", False)
+        or (button is not None and button.isChecked())
+    )
+
+
+def get_effective_ocr_settings(
+    main_page: Any,
+    source_lang: str,
+    ocr_model: str,
+) -> tuple[str, str]:
+    if force_japanese_ocr_enabled(main_page):
+        return "Japanese", "Default"
+    return source_lang, ocr_model
+
+
 class OCRProcessor:
     """
     Processor for OCR operations using various engines.
@@ -30,9 +48,13 @@ class OCRProcessor:
         """
         self.main_page = main_page
         self.settings = main_page.settings_page
-        self.source_lang = source_lang
-        self.source_lang_english = self._get_english_lang(source_lang)
-        self.ocr_key = self._get_ocr_key(self.settings.get_tool_selection('ocr'))
+        self.source_lang, ocr_model = get_effective_ocr_settings(
+            main_page,
+            source_lang,
+            self.settings.get_tool_selection('ocr'),
+        )
+        self.source_lang_english = self._get_english_lang(self.source_lang)
+        self.ocr_key = self._get_ocr_key(ocr_model)
         
     def _get_english_lang(self, translated_lang: str) -> str:
         return self.main_page.lang_mapping.get(translated_lang, translated_lang)

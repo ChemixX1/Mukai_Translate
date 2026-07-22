@@ -9,11 +9,11 @@ class Messages:
 
         MMessage.success(
             text=QCoreApplication.translate(
-                "Messages", 
-                "Comic has been Translated!"
+                "Messages",
+                "Manga has been translated successfully."
             ),
             parent=parent,
-            duration=None,
+            duration=15,
             closable=True
         )
 

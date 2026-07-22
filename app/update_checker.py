@@ -1,32 +1,103 @@
+import base64
+import hashlib
+import html
+import json
+import logging
 import os
 import platform
-import logging
-import requests
 import subprocess
 import tempfile
+from typing import Any
+
+import requests
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from packaging import version
-from PySide6.QtCore import QObject, Signal, QThread, QStandardPaths
+from PySide6.QtCore import QObject, QStandardPaths, QThread, Signal
+
+from app.release_config import UPDATE_MANIFEST_URL, UPDATE_PUBLIC_KEY
 from app.version import __version__
+
 
 logger = logging.getLogger(__name__)
 
+
+def canonical_manifest_payload(payload: dict[str, Any]) -> bytes:
+    """Serialize a release payload exactly as the WordPress signer does."""
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def validate_release_manifest(data: dict[str, Any], public_key: str) -> dict[str, Any]:
+    """Verify and normalize a signed release manifest from Mukai's server."""
+    if not isinstance(data, dict):
+        raise ValueError("The update server returned an invalid manifest.")
+
+    signature = data.get("signature")
+    algorithm = data.get("algorithm")
+    payload = data.get("release")
+    if algorithm != "RSA-SHA256" or not isinstance(signature, str) or not isinstance(payload, dict):
+        raise ValueError("The update manifest is missing its signature.")
+
+    try:
+        key_bytes = base64.b64decode(public_key, validate=True)
+        signature_bytes = base64.b64decode(signature, validate=True)
+        key = serialization.load_pem_public_key(key_bytes)
+        if not isinstance(key, rsa.RSAPublicKey) or key.key_size < 3072:
+            raise ValueError("The update signing key is not strong enough.")
+        key.verify(
+            signature_bytes,
+            canonical_manifest_payload(payload),
+            padding.PKCS1v15(),
+            hashes.SHA256(),
+        )
+    except (ValueError, TypeError, InvalidSignature) as exc:
+        raise ValueError("The update manifest signature could not be verified.") from exc
+
+    required_fields = ("version", "notes", "installer_url", "sha256", "published_at")
+    if any(not isinstance(payload.get(field), str) or not payload[field].strip() for field in required_fields):
+        raise ValueError("The signed update manifest is incomplete.")
+    if not payload["installer_url"].startswith("https://"):
+        raise ValueError("The update installer must use a secure HTTPS URL.")
+    if len(payload["sha256"]) != 64 or any(char not in "0123456789abcdefABCDEF" for char in payload["sha256"]):
+        raise ValueError("The update manifest contains an invalid installer checksum.")
+
+    try:
+        version.parse(payload["version"])
+    except Exception as exc:
+        raise ValueError("The update manifest contains an invalid version.") from exc
+
+    return {
+        "version": payload["version"].strip(),
+        "notes": payload["notes"].strip(),
+        "installer_url": payload["installer_url"].strip(),
+        "sha256": payload["sha256"].lower(),
+        "published_at": payload["published_at"].strip(),
+    }
+
+
 class UpdateChecker(QObject):
-    """
-    Checks for updates on GitHub and handles downloading/running installers.
-    """
-    update_available = Signal(str, str, str)  # version, release_notes, download_url
+    """Checks Mukai's signed release feed and runs verified installers."""
+
+    update_available = Signal(str, str, str, str)  # version, notes, URL, SHA-256
     up_to_date = Signal()
     error_occurred = Signal(str)
     download_progress = Signal(int)
-    download_finished = Signal(str) # file_path
-
-    REPO_OWNER = "ogkalu2"
-    REPO_NAME = "comic-translate"
+    download_finished = Signal(str)  # file path
 
     def __init__(self):
         super().__init__()
         self._worker_thread = None
         self._worker = None
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(UPDATE_MANIFEST_URL.strip() and UPDATE_PUBLIC_KEY.strip())
 
     def _safe_stop_thread(self):
         try:
@@ -34,119 +105,95 @@ class UpdateChecker(QObject):
                 self._worker_thread.quit()
                 self._worker_thread.wait()
         except RuntimeError:
-            # The C++ object has been deleted
             pass
-        except Exception as e:
-            logger.error(f"Error stopping thread: {e}")
+        except Exception as exc:
+            logger.error("Error stopping update worker: %s", exc)
         self._worker_thread = None
 
     def check_for_updates(self):
-        """Starts the check in a background thread."""
+        """Start the signed-feed check in a background thread."""
+        if not self.is_configured:
+            self.error_occurred.emit("The Mukai update channel has not been configured for this edition yet.")
+            return
+
         self._safe_stop_thread()
-            
         self._worker_thread = QThread()
-        self._worker = UpdateWorker(self.REPO_OWNER, self.REPO_NAME, __version__)
+        self._worker = UpdateWorker(UPDATE_MANIFEST_URL, UPDATE_PUBLIC_KEY, __version__)
         self._worker.moveToThread(self._worker_thread)
-        
+
         self._worker.finished.connect(self._worker_thread.quit)
         self._worker.finished.connect(self._worker.deleteLater)
         self._worker_thread.finished.connect(self._worker_thread.deleteLater)
-        
         self._worker.update_available.connect(self.update_available)
         self._worker.up_to_date.connect(self.up_to_date)
         self._worker.error.connect(self.error_occurred)
-        
         self._worker_thread.started.connect(self._worker.run)
         self._worker_thread.start()
 
-    def download_installer(self, url, filename):
-        """Starts the download in a background thread."""
+    def download_installer(self, url: str, filename: str, checksum: str):
+        """Download an installer and verify its SHA-256 in a worker thread."""
         self._safe_stop_thread()
-
         self._worker_thread = QThread()
-        self._worker = DownloadWorker(url, filename)
+        self._worker = DownloadWorker(url, filename, checksum)
         self._worker.moveToThread(self._worker_thread)
-        
+
         self._worker.finished.connect(self._worker_thread.quit)
         self._worker.finished.connect(self._worker.deleteLater)
         self._worker_thread.finished.connect(self._worker_thread.deleteLater)
-        
         self._worker.progress.connect(self.download_progress)
         self._worker.finished_path.connect(self.download_finished)
         self._worker.error.connect(self.error_occurred)
-        
         self._worker_thread.started.connect(self._worker.run)
         self._worker_thread.start()
 
-    def run_installer(self, file_path):
-        """Executes the installer based on the platform."""
+    def run_installer(self, file_path: str):
         try:
             system = platform.system()
             if system == "Windows":
-                # Use os.startfile; Windows will parse the installer manifest
-                # and trigger UAC only if the installer requires it.
                 os.startfile(file_path)
-            elif system == "Darwin": # macOS
+            elif system == "Darwin":
                 subprocess.Popen(["open", file_path])
-        except Exception as e:
-            self.error_occurred.emit(f"Failed to launch installer: {e}")
+        except Exception as exc:
+            self.error_occurred.emit(f"Failed to launch installer: {exc}")
 
     def shutdown(self):
-        """Stops any active worker thread (best-effort)."""
         self._safe_stop_thread()
         self._worker_thread = None
         self._worker = None
 
 
 class UpdateWorker(QObject):
-    update_available = Signal(str, str, str)
+    update_available = Signal(str, str, str, str)
     up_to_date = Signal()
     error = Signal(str)
     finished = Signal()
 
-    def __init__(self, owner, repo, current_version):
+    def __init__(self, manifest_url: str, public_key: str, current_version: str):
         super().__init__()
-        self.owner = owner
-        self.repo = repo
+        self.manifest_url = manifest_url
+        self.public_key = public_key
         self.current_version = current_version
 
     def run(self):
         try:
-            url = f"https://api.github.com/repos/{self.owner}/{self.repo}/releases/latest"
-            response = requests.get(url, timeout=10)
+            response = requests.get(
+                self.manifest_url,
+                timeout=10,
+                headers={"Accept": "application/json"},
+            )
             response.raise_for_status()
-            data = response.json()
-            
-            latest_tag = data.get("tag_name", "").lstrip("v")
-            if not latest_tag:
-                 self.error.emit("Could not parse version from release.")
-                 self.finished.emit()
-                 return
-
-            if version.parse(latest_tag) > version.parse(self.current_version):
-                # Find appropriate asset
-                asset_url = None
-                system = platform.system()
-                if system == "Windows":
-                    for asset in data.get("assets", []):
-                        if asset["name"].endswith(".exe") or asset["name"].endswith(".msi"):
-                            asset_url = asset["browser_download_url"]
-                            break
-                elif system == "Darwin":
-                    for asset in data.get("assets", []):
-                        if asset["name"].endswith(".dmg") or asset["name"].endswith(".pkg"):
-                            asset_url = asset["browser_download_url"]
-                            break
-                
-                if asset_url:
-                    self.update_available.emit(latest_tag, data.get("html_url", ""), asset_url)
-                else:
-                    self.error.emit(f"New version {latest_tag} available, but no installer found for your OS.")
+            release = validate_release_manifest(response.json(), self.public_key)
+            if version.parse(release["version"]) > version.parse(self.current_version):
+                self.update_available.emit(
+                    release["version"],
+                    release["notes"],
+                    release["installer_url"],
+                    release["sha256"],
+                )
             else:
                 self.up_to_date.emit()
-
-        except Exception as e:
-            self.error.emit(str(e))
+        except Exception as exc:
+            self.error.emit(str(exc))
         finally:
             self.finished.emit()
 
@@ -157,42 +204,54 @@ class DownloadWorker(QObject):
     error = Signal(str)
     finished = Signal()
 
-    def __init__(self, url, filename):
+    def __init__(self, url: str, filename: str, checksum: str):
         super().__init__()
         self.url = url
         self.filename = filename
+        self.checksum = checksum.lower()
 
     def run(self):
+        save_path = ""
         try:
-            # Download to Downloads directory
             download_dir = QStandardPaths.writableLocation(QStandardPaths.DownloadLocation)
             if not download_dir:
                 download_dir = os.path.join(os.path.expanduser("~"), "Downloads")
-            
-            # Fallback to temp if Downloads doesn't exist
             if not os.path.exists(download_dir):
                 download_dir = tempfile.gettempdir()
 
-            save_path = os.path.join(download_dir, self.filename)
-            
+            safe_filename = os.path.basename(self.filename) or "MukaiTranslator-Setup.exe"
+            save_path = os.path.join(download_dir, safe_filename)
+            digest = hashlib.sha256()
             response = requests.get(self.url, stream=True, timeout=30)
             response.raise_for_status()
-            
-            total_size = int(response.headers.get('content-length', 0))
+            total_size = int(response.headers.get("content-length", 0))
             downloaded_size = 0
-            
-            with open(save_path, 'wb') as f:
+
+            with open(save_path, "wb") as file_handle:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
-                        f.write(chunk)
+                        file_handle.write(chunk)
+                        digest.update(chunk)
                         downloaded_size += len(chunk)
                         if total_size > 0:
-                            percent = int((downloaded_size / total_size) * 100)
-                            self.progress.emit(percent)
-            
+                            self.progress.emit(int((downloaded_size / total_size) * 100))
+
+            if digest.hexdigest() != self.checksum:
+                os.remove(save_path)
+                raise ValueError("The downloaded installer failed its security check.")
+
             self.finished_path.emit(save_path)
-            
-        except Exception as e:
-            self.error.emit(str(e))
+        except Exception as exc:
+            if save_path and os.path.exists(save_path):
+                try:
+                    os.remove(save_path)
+                except OSError:
+                    pass
+            self.error.emit(str(exc))
         finally:
             self.finished.emit()
+
+
+def release_notes_to_html(notes: str) -> str:
+    """Render untrusted plain-text notes safely in the Qt update dialog."""
+    return html.escape(notes).replace("\n", "<br>")

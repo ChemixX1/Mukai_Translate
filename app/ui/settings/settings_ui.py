@@ -60,7 +60,7 @@ class SettingsPageUI(QtWidgets.QWidget):
             self.tr('Gemini-2.0-Flash'), 
         ]
         self.inpaint_strategy = [self.tr('Resize'), self.tr('Original'), self.tr('Crop')]
-        self.themes = [self.tr('Dark'), self.tr('Light')]
+        self.themes = [self.tr("Blue"), self.tr("Black"), self.tr("Light")]
         self.alignment = [self.tr("Left"), self.tr("Center"), self.tr("Right")]
 
         self.credential_services = [
@@ -69,6 +69,8 @@ class SettingsPageUI(QtWidgets.QWidget):
             self.tr("Anthropic Claude"),
             self.tr("Deepseek"),
             self.tr("Grok"),
+            self.tr("Microsoft Azure"),
+            self.tr("Google Cloud"),
             self.tr("Custom"),
         ]
         
@@ -112,7 +114,8 @@ class SettingsPageUI(QtWidgets.QWidget):
             "Italiano": "Italiano",
 
             # Theme mappings
-            self.tr("Dark"): "Dark",
+            self.tr("Blue"): "Blue",
+            self.tr("Black"): "Black",
             self.tr("Light"): "Light",
 
             # Translator mappings

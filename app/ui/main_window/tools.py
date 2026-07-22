@@ -21,6 +21,7 @@ class ToolStateMixin:
 
     def toggle_brush_tool(self):
         if self.brush_button.isChecked():
+            self.image_viewer.set_magic_eraser_refinement(False)
             self.set_tool("brush")
             size = self.image_viewer.brush_size
             self.set_slider_size(size)
@@ -80,6 +81,20 @@ class ToolStateMixin:
                 else:
                     self.image_viewer.drawing_manager.set_brush_size(size, scaled_size)
                     self.image_viewer.drawing_manager.set_eraser_size(size, scaled_size)
+
+    def activate_magic_eraser(self):
+        """Arm the inpainting brush with the size chosen in the compact menu."""
+        if not self.image_viewer.hasPhoto():
+            return
+
+        size = int(self.magic_eraser_size_slider.value())
+        self.set_brush_eraser_size(size)
+        self.set_slider_size(size)
+        self.image_viewer.set_magic_eraser_refinement(
+            self.magic_eraser_sam_checkbox.isChecked()
+        )
+        self.set_tool("brush")
+        self.magic_eraser_menu.hide()
 
     def scale_size(self, base_size, image_width, image_height):
         image_diagonal = (image_width**2 + image_height**2) ** 0.5
@@ -170,8 +185,24 @@ class ToolStateMixin:
         if color_dialog.exec() == QtWidgets.QDialog.Accepted:
             return color_dialog.selectedColor()
 
+    def get_text_fill_style(self, current_style: dict | None = None):
+        """Open the text-fill editor used by the main font-colour button.
+
+        Keeping this separate from ``get_color`` means the outline selector
+        stays a simple colour control, while this editor owns only solid and
+        multi-stop gradient fills. Visual effects live in the right sidebar.
+        """
+        from app.ui.text_fill_dialog import TextFillDialog
+
+        dialog = TextFillDialog(current_style, self)
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            return dialog.fill_style()
+        return None
+
     def set_font(self, font_family: str):
         resolved_family = self.ensure_custom_font_loaded(font_family)
         self.font_dropdown.setCurrentFont(QtGui.QFont(resolved_family))
         if self.font_dropdown.currentText() != resolved_family:
             self.font_dropdown.setCurrentText(resolved_family)
+        if hasattr(self, "font_family_button"):
+            self.font_family_button.setText(resolved_family)

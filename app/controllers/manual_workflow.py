@@ -4,9 +4,15 @@ from typing import TYPE_CHECKING, Any, Sequence
 
 from PySide6 import QtCore
 
+from app.glossary import append_glossary_context
+from app.ui.dayu_widgets.message import MMessage
 from modules.detection.processor import TextBlockDetector
 from modules.detection.utils.content import get_inpaint_bboxes
-from modules.ocr.processor import OCRProcessor
+from modules.ocr.processor import (
+    OCRProcessor,
+    force_japanese_ocr_enabled,
+    get_effective_ocr_settings,
+)
 from modules.rendering.render import pyside_word_wrap, is_vertical_block, get_best_render_area
 from modules.translation.processor import Translator
 from modules.utils.common_utils import is_close
@@ -165,7 +171,11 @@ class ManualWorkflowController:
                         get_best_render_area(blk_list, image)
                     state = self.main.image_states.get(file_path, {})
                     source_lang = state.get("source_lang", source_lang_fallback)
-                    source_lang_en = self.main.lang_mapping.get(source_lang, source_lang)
+                    source_lang_en = (
+                        "Japanese"
+                        if force_japanese_ocr_enabled(self.main)
+                        else self.main.lang_mapping.get(source_lang, source_lang)
+                    )
                     rtl = source_lang_en == "Japanese"
                     results[file_path] = sort_blk_list(blk_list, rtl)
                 return results
@@ -257,7 +267,17 @@ class ManualWorkflowController:
                     if image is None:
                         continue
                     source_lang = state.get("source_lang", source_lang_fallback)
-                    cache_key = cache_manager._get_ocr_cache_key(image, source_lang, ocr_model, device)
+                    cache_source_lang, cache_ocr_model = get_effective_ocr_settings(
+                        self.main,
+                        source_lang,
+                        ocr_model,
+                    )
+                    cache_key = cache_manager._get_ocr_cache_key(
+                        image,
+                        cache_source_lang,
+                        cache_ocr_model,
+                        device,
+                    )
                     if cache_manager._can_serve_all_blocks_from_ocr_cache(cache_key, blk_list):
                         cache_manager._apply_cached_ocr_to_blocks(cache_key, blk_list)
                     else:
@@ -333,7 +353,9 @@ class ManualWorkflowController:
             source_lang_fallback = self.main.s_combo.currentText()
             target_lang_fallback = self.main.t_combo.currentText()
             settings_page = self.main.settings_page
-            extra_context = settings_page.get_llm_settings()["extra_context"]
+            extra_context = append_glossary_context(
+                settings_page.get_llm_settings()["extra_context"]
+            )
             translator_key = settings_page.get_tool_selection("translator")
             upper_case = settings_page.ui.uppercase_checkbox.isChecked()
 
@@ -351,17 +373,21 @@ class ManualWorkflowController:
                     source_lang = state.get("source_lang", source_lang_fallback)
                     target_lang = state.get("target_lang", target_lang_fallback)
                     translator = Translator(self.main, source_lang, target_lang)
+                    page_context = translator.prepare_context(
+                        blk_list,
+                        extra_context,
+                    )
                     cache_key = cache_manager._get_translation_cache_key(
                         image,
                         source_lang,
                         target_lang,
                         translator_key,
-                        extra_context,
+                        page_context,
                     )
                     if cache_manager._can_serve_all_blocks_from_translation_cache(cache_key, blk_list):
                         cache_manager._apply_cached_translations_to_blocks(cache_key, blk_list)
                     else:
-                        translator.translate(blk_list, image, extra_context)
+                        translator.translate(blk_list, image, page_context)
                         cache_manager._cache_translation_results(cache_key, blk_list)
                     set_upper_case(blk_list, upper_case)
                     results[file_path] = blk_list
@@ -431,7 +457,10 @@ class ManualWorkflowController:
             
             if is_no_space_lang(trg_lng_cd):
                 wrapped = wrapped.replace(" ", "")
-            text_item.set_plain_text(wrapped)
+                text_item.set_plain_text(wrapped)
+            else:
+                # Keep the text re-flowable so resizing the box re-wraps it.
+                text_item.set_rendered_text(wrapped)
             text_item.set_font_size(font_size)
 
         text_items_to_process = self._get_visible_text_items()
@@ -588,10 +617,26 @@ class ManualWorkflowController:
             self.main.loading.setVisible(True)
             self.main.disable_hbutton_group()
             self.main.undo_group.activeStack().beginMacro("inpaint")
+            use_sam = bool(
+                getattr(self.main.image_viewer, "magic_eraser_refine_with_sam", False)
+            )
+
+            def on_magic_eraser_error(error_tuple) -> None:
+                _exc_type, error, _traceback = error_tuple
+                try:
+                    self.main.undo_group.activeStack().endMacro()
+                except Exception:
+                    pass
+                MMessage.warning(
+                    self.main.tr(f"Magic Eraser could not refine the mask: {error}"),
+                    parent=self.main,
+                    duration=6,
+                )
+
             self.main.run_threaded(
-                self.main.pipeline.inpaint,
+                self.main.pipeline.magic_eraser_inpaint if use_sam else self.main.pipeline.inpaint,
                 self.main.pipeline.inpaint_complete,
-                self.main.default_error_handler,
+                on_magic_eraser_error if use_sam else self.main.default_error_handler,
                 self.main.on_manual_finished,
             )
 

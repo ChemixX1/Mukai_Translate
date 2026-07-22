@@ -10,7 +10,17 @@ from typing import Any
 
 import imkit as imk
 import numpy as np
-import photoshopapi as psapi
+
+try:
+    import photoshopapi as psapi
+except ImportError as _psapi_error:
+    # On Windows, Smart App Control / WDAC can block the unsigned native DLL.
+    # Degrade gracefully: the app starts and PSD import fails only when used.
+    psapi = None
+    _PSAPI_IMPORT_ERROR: ImportError | None = _psapi_error
+else:
+    _PSAPI_IMPORT_ERROR = None
+
 from PySide6 import QtCore, QtGui
 
 from app.ui.canvas.text_item import OutlineInfo, OutlineType
@@ -36,7 +46,17 @@ class PsdImportContext:
     warning: str | None
 
 
+def _require_psapi() -> None:
+    if psapi is None:
+        raise RuntimeError(
+            "PSD support is unavailable: the 'photoshopapi' module failed to load "
+            f"({_PSAPI_IMPORT_ERROR}). On Windows this is usually caused by "
+            "Smart App Control or an App Control policy blocking the unsigned native DLL."
+        )
+
+
 def import_psd_files(paths: list[str]) -> list[ImportedPsdPage]:
+    _require_psapi()
     if not paths:
         return []
 
@@ -532,6 +552,59 @@ def _import_text_layer(layer: Any) -> dict[str, Any] | None:
         "height": box_h,
         "vertical": _is_vertical(layer),
         "selection_outlines": outlines,
+        "warp": _text_warp(layer),
+    }
+
+
+def _text_warp(layer: Any) -> dict[str, Any]:
+    has_warp = getattr(layer, "has_warp", False)
+    if callable(has_warp):
+        try:
+            has_warp = has_warp()
+        except Exception:
+            has_warp = False
+
+    raw_style = getattr(layer, "warp_style", None)
+    style_name = getattr(raw_style, "name", "") or str(raw_style or "")
+    style_name = style_name.rsplit(".", 1)[-1]
+    style_map = {
+        "Arc": "arc",
+        "ArcLower": "arc_lower",
+        "ArcUpper": "arc_upper",
+        "Arch": "arch",
+        "Bulge": "bulge",
+        "ShellLower": "shell_lower",
+        "ShellUpper": "shell_upper",
+        "Flag": "flag",
+        "Wave": "wave",
+        "Fish": "fish",
+        "Rise": "rise",
+        "FishEye": "fish_eye",
+        "Inflate": "inflate",
+        "Squeeze": "squeeze",
+        "Twist": "twist",
+    }
+    style = style_map.get(style_name)
+    if not has_warp or style is None:
+        return {
+            "enabled": False,
+            "style": "flag",
+            "bend": 24,
+            "horizontal": 0,
+            "vertical": 0,
+            "orientation": "horizontal",
+        }
+
+    raw_rotation = getattr(layer, "warp_rotation", None)
+    rotation_name = getattr(raw_rotation, "name", "") or str(raw_rotation or "")
+    orientation = "vertical" if rotation_name.rsplit(".", 1)[-1] == "Vertical" else "horizontal"
+    return {
+        "enabled": True,
+        "style": style,
+        "bend": int(round(_as_float(getattr(layer, "warp_value", None), 0.0))),
+        "horizontal": int(round(_as_float(getattr(layer, "warp_horizontal_distortion", None), 0.0))),
+        "vertical": int(round(_as_float(getattr(layer, "warp_vertical_distortion", None), 0.0))),
+        "orientation": orientation,
     }
 
 

@@ -8,8 +8,10 @@ import numpy as np
 import requests
 from PySide6.QtCore import QCoreApplication
 
+from app.glossary import append_glossary_context
 from app.ui.messages import Messages
 from modules.detection.processor import TextBlockDetector
+from modules.ocr.processor import force_japanese_ocr_enabled
 from modules.translation.processor import Translator
 from modules.utils.device import resolve_device
 from modules.utils.exceptions import InsufficientCreditsException
@@ -120,7 +122,11 @@ class ChunkMixin:
         try:
             self.ocr_handler.ocr.process(image, blocks)
             if sort_after:
-                source_lang_en = self.main_page.lang_mapping.get(source_lang, source_lang)
+                source_lang_en = (
+                    "Japanese"
+                    if force_japanese_ocr_enabled(self.main_page)
+                    else self.main_page.lang_mapping.get(source_lang, source_lang)
+                )
                 rtl = source_lang_en == "Japanese"
                 return sort_blk_list(blocks, rtl)
             return blocks
@@ -143,7 +149,9 @@ class ChunkMixin:
     ) -> None:
         if not blocks:
             return
-        extra_context = self.main_page.settings_page.get_llm_settings()["extra_context"]
+        extra_context = append_glossary_context(
+            self.main_page.settings_page.get_llm_settings()["extra_context"]
+        )
         translator = Translator(self.main_page, source_lang, target_lang)
         try:
             translator.translate(blocks, image, extra_context)

@@ -13,6 +13,7 @@ from typing import List
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtGui import QColor
 
+from app.glossary import append_glossary_context
 from modules.detection.processor import TextBlockDetector
 from modules.translation.processor import Translator
 from modules.utils.textblock import sort_blk_list
@@ -31,6 +32,7 @@ from .cache_manager import CacheManager
 from .block_detection import BlockDetectionHandler
 from .inpainting import InpaintingHandler
 from .ocr_handler import OCRHandler
+from modules.ocr.processor import get_effective_ocr_settings
 
 if TYPE_CHECKING:
     from controller import ComicTranslate
@@ -155,14 +157,28 @@ class BatchProcessor:
                 # Get ocr cache key for batch processing
                 ocr_model = settings_page.get_tool_selection('ocr')
                 device = resolve_device(settings_page.is_gpu_enabled())
-                cache_key = self.cache_manager._get_ocr_cache_key(image, source_lang, ocr_model, device)
-                # Use the shared OCR processor from the handler
-                self.ocr_handler.ocr.initialize(self.main_page, source_lang)
+                cache_source_lang, cache_ocr_model = get_effective_ocr_settings(
+                    self.main_page,
+                    source_lang,
+                    ocr_model,
+                )
+                cache_key = self.cache_manager._get_ocr_cache_key(
+                    image,
+                    cache_source_lang,
+                    cache_ocr_model,
+                    device,
+                )
                 try:
-                    self.ocr_handler.ocr.process(image, blk_list)
-                    # Cache the OCR results for potential future use
-                    self.cache_manager._cache_ocr_results(cache_key, self.main_page.blk_list)
-                    source_lang_english = self.main_page.lang_mapping.get(source_lang, source_lang)
+                    if self.cache_manager._can_serve_all_blocks_from_ocr_cache(cache_key, blk_list):
+                        self.cache_manager._apply_cached_ocr_to_blocks(cache_key, blk_list)
+                        logger.info("Using cached OCR results for %d batch blocks", len(blk_list))
+                    else:
+                        # Use the shared OCR processor from the handler
+                        self.ocr_handler.ocr.initialize(self.main_page, source_lang)
+                        self.ocr_handler.ocr.process(image, blk_list)
+                        # Cache this page's OCR results for potential future use
+                        self.cache_manager._cache_ocr_results(cache_key, blk_list)
+                    source_lang_english = self.main_page.lang_mapping.get(cache_source_lang, cache_source_lang)
                     rtl = True if source_lang_english == 'Japanese' else False
                     blk_list = sort_blk_list(blk_list, rtl)
                     
@@ -243,9 +259,12 @@ class BatchProcessor:
                 return
 
             # Get Translations/ Export if selected
-            extra_context = settings_page.get_llm_settings()['extra_context']
+            extra_context = append_glossary_context(
+                settings_page.get_llm_settings()['extra_context']
+            )
             translator_key = settings_page.get_tool_selection('translator')
             translator = Translator(self.main_page, source_lang, target_lang)
+            extra_context = translator.prepare_context(blk_list, extra_context)
             
             # Get translation cache key for batch processing
             translation_cache_key = self.cache_manager._get_translation_cache_key(
@@ -253,9 +272,13 @@ class BatchProcessor:
             )
             
             try:
-                translator.translate(blk_list, image, extra_context)
-                # Cache the translation results for potential future use
-                self.cache_manager._cache_translation_results(translation_cache_key, blk_list)
+                if self.cache_manager._can_serve_all_blocks_from_translation_cache(translation_cache_key, blk_list):
+                    self.cache_manager._apply_cached_translations_to_blocks(translation_cache_key, blk_list)
+                    logger.info("Using cached translations for %d batch blocks", len(blk_list))
+                else:
+                    translator.translate(blk_list, image, extra_context)
+                    # Cache the translation results for potential future use
+                    self.cache_manager._cache_translation_results(translation_cache_key, blk_list)
             except InsufficientCreditsException:
                 raise
             except Exception as e:
@@ -399,12 +422,25 @@ class BatchProcessor:
                 if is_no_space_lang(trg_lng_cd):
                     translation = translation.replace(' ', '')
 
+                # Store re-flowable content (single paragraph + pinned width) so the
+                # box re-wraps when its width changes instead of keeping the baked-in
+                # line breaks from the auto-wrapper.
+                reflow_text = translation
+                fixed_wrap = None
+                if not vertical and not is_no_space_lang(trg_lng_cd):
+                    unwrapped = " ".join(
+                        part for part in translation.split("\n") if part != ""
+                    )
+                    if unwrapped and unwrapped != translation:
+                        reflow_text = unwrapped
+                        fixed_wrap = rendered_width
+
                 # Smart Color Override
                 font_color = get_smart_text_color(blk.font_color, setting_font_color)
 
                 # Use TextItemProperties for consistent text item creation
                 text_props = TextItemProperties(
-                    text=translation,
+                    text=reflow_text,
                     font_family=font,
                     font_size=font_size,
                     text_color=font_color,
@@ -423,10 +459,11 @@ class BatchProcessor:
                     height=rendered_height,
                     direction=direction,
                     vertical=vertical,
+                    fixed_wrap_width=fixed_wrap,
                     selection_outlines=[
-                        OutlineInfo(0, len(translation), 
-                        outline_color, 
-                        outline_width, 
+                        OutlineInfo(0, len(reflow_text),
+                        outline_color,
+                        outline_width,
                         OutlineType.Full_Document)
                     ] if outline else [],
                 )

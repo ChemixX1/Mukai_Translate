@@ -59,6 +59,8 @@ class InteractionManager:
         """Checks if a scene position is within the item's resize area."""
         if not item: return False
         local = item.mapFromScene(scene_pos)
+        if isinstance(item, TextBlockItem):
+            return self.get_resize_handle(item, local) is not None
         r = item.boundingRect()
         dx = max(r.left() - local.x(), 0, local.x() - r.right())
         dy = max(r.top() - local.y(), 0, local.y() - r.bottom())
@@ -76,8 +78,7 @@ class InteractionManager:
 
     def get_resize_cursor(self, item: MoveableRectItem | TextBlockItem, pos: QPointF) -> QtGui.QCursor:
         """Gets the appropriate resize cursor for a given position."""
-        rect = item.boundingRect()
-        handle = self.get_handle_at_position(pos, rect)
+        handle = self.get_resize_handle(item, pos)
         
         cursors = {
             'top_left': Qt.CursorShape.SizeFDiagCursor,
@@ -117,7 +118,75 @@ class InteractionManager:
 
     def get_resize_handle(self, item: MoveableRectItem | TextBlockItem, pos: QPointF) -> str | None:
         """Determines which resize handle is at a position (pos is in item's local coordinates)."""
+        if isinstance(item, TextBlockItem):
+            interaction_rect = (
+                item.interaction_rect()
+                if hasattr(item, "interaction_rect")
+                else item.boundingRect()
+            )
+            return self.get_text_handle_at_position(
+                pos,
+                interaction_rect,
+                self._text_handle_hit_size(item),
+            )
         return self.get_handle_at_position(pos, item.boundingRect())
+
+    def _text_handle_hit_size(self, item: TextBlockItem) -> float:
+        """Return a local hit size that stays easy to grab at any canvas zoom."""
+        scene = item.scene()
+        views = scene.views() if scene is not None else []
+        if not views:
+            return max(16.0, float(self.resize_margin_max))
+        transform = item.deviceTransform(views[0].viewportTransform())
+        view_scale = max(
+            0.001,
+            math.hypot(transform.m11(), transform.m12()),
+            math.hypot(transform.m21(), transform.m22()),
+        )
+        return max(16.0, float(self.resize_margin_max)) / view_scale
+
+    def get_text_handle_at_position(
+        self,
+        pos: QPointF,
+        rect: QRectF,
+        hit_size: float | None = None,
+    ) -> str | None:
+        """Resolve the four corner dots and the two centred width handles."""
+        hit_size = (
+            max(16.0, float(self.resize_margin_max))
+            if hit_size is None else max(4.0, float(hit_size))
+        )
+        half = hit_size / 2.0
+        side_height = hit_size * 1.8
+        corners = {
+            'top_left': QRectF(rect.left() - half, rect.top() - half, hit_size, hit_size),
+            'top_right': QRectF(rect.right() - half, rect.top() - half, hit_size, hit_size),
+            'bottom_left': QRectF(rect.left() - half, rect.bottom() - half, hit_size, hit_size),
+            'bottom_right': QRectF(rect.right() - half, rect.bottom() - half, hit_size, hit_size),
+        }
+        for handle, area in corners.items():
+            if area.contains(pos):
+                return handle
+
+        center_y = rect.center().y()
+        sides = {
+            'left': QRectF(
+                rect.left() - half,
+                center_y - side_height / 2.0,
+                hit_size,
+                side_height,
+            ),
+            'right': QRectF(
+                rect.right() - half,
+                center_y - side_height / 2.0,
+                hit_size,
+                side_height,
+            ),
+        }
+        for handle, area in sides.items():
+            if area.contains(pos):
+                return handle
+        return None
 
     def get_handle_at_position(self, pos, rect):
         handle_size = self.resize_margin_max # Use manager's property

@@ -21,3 +21,13 @@ uv.lock
 # Test files
 test_*.py
 demo_*.py
+
+# Local Windows release artifacts
+build/
+dist/
+installer/
+releases/
+MukaiTranslator-Developer.exe
+
+# Local visual references (not part of the application or installer)
+assets/references/

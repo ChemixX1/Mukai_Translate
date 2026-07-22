@@ -11,7 +11,17 @@ logger = logging.getLogger(__name__)
 
 import imkit as imk
 import numpy as np
-import photoshopapi as psapi
+
+try:
+	import photoshopapi as psapi
+except ImportError as _psapi_error:
+	# On Windows, Smart App Control / WDAC can block the unsigned native DLL.
+	# Degrade gracefully: the app starts and PSD export fails only when used.
+	psapi = None
+	_PSAPI_IMPORT_ERROR: ImportError | None = _psapi_error
+else:
+	_PSAPI_IMPORT_ERROR = None
+
 from PySide6 import QtCore, QtGui
 
 from app.ui.canvas.text.text_item_properties import TextItemProperties
@@ -58,12 +68,22 @@ class OutlineStyleSpan:
 	width: float
 
 
+def _require_psapi() -> None:
+	if psapi is None:
+		raise RuntimeError(
+			"PSD support is unavailable: the 'photoshopapi' module failed to load "
+			f"({_PSAPI_IMPORT_ERROR}). On Windows this is usually caused by "
+			"Smart App Control or an App Control policy blocking the unsigned native DLL."
+		)
+
+
 def export_psd_pages(
 	output_folder: str,
 	pages: list[PsdPageData],
 	bundle_name: str,
 	single_file_path: str | None = None,
 ) -> str:
+	_require_psapi()
 	if not pages:
 		raise ValueError("No images available to export.")
 
@@ -230,6 +250,7 @@ def _build_text_layer(state: dict[str, Any], index: int) -> Any | None:
 	# Apply text direction after style/paragraph edits.
 	_apply_text_direction(layer, props)
 	_apply_text_rotation(layer, props)
+	_apply_text_warp(layer, props)
 
 	return layer
 
@@ -782,6 +803,62 @@ def _apply_text_rotation(layer: Any, props: TextItemProperties) -> None:
 		pass
 
 	logger.debug("Text layer rotation %.3f was not applied: no compatible API found.", rotation)
+
+
+def _apply_text_warp(layer: Any, props: TextItemProperties) -> None:
+	warp = getattr(props, "warp", None)
+	if not isinstance(warp, dict):
+		return
+
+	style_map = {
+		"arc": "Arc",
+		"arc_lower": "ArcLower",
+		"arc_upper": "ArcUpper",
+		"arch": "Arch",
+		"bulge": "Bulge",
+		"shell_lower": "ShellLower",
+		"shell_upper": "ShellUpper",
+		"flag": "Flag",
+		"wave": "Wave",
+		"fish": "Fish",
+		"rise": "Rise",
+		"fish_eye": "FishEye",
+		"inflate": "Inflate",
+		"squeeze": "Squeeze",
+		"twist": "Twist",
+	}
+	style_name = style_map.get(str(warp.get("style", "")))
+	warp_style_enum = getattr(getattr(psapi, "enum", None), "WarpStyle", None)
+	warp_rotation_enum = getattr(getattr(psapi, "enum", None), "WarpRotation", None)
+	if warp_style_enum is None:
+		return
+
+	if not bool(warp.get("enabled", False)) or style_name is None:
+		no_warp = getattr(warp_style_enum, "NoWarp", None)
+		if no_warp is not None:
+			_set_if_exists(layer, "set_warp_style", no_warp)
+		return
+
+	style_value = getattr(warp_style_enum, style_name, None)
+	if style_value is None or not _set_if_exists(layer, "set_warp_style", style_value):
+		return
+
+	_set_if_exists(layer, "set_warp_value", _float_or_default(warp.get("bend"), 0.0))
+	_set_if_exists(
+		layer,
+		"set_warp_horizontal_distortion",
+		_float_or_default(warp.get("horizontal"), 0.0),
+	)
+	_set_if_exists(
+		layer,
+		"set_warp_vertical_distortion",
+		_float_or_default(warp.get("vertical"), 0.0),
+	)
+	if warp_rotation_enum is not None:
+		rotation_name = "Vertical" if warp.get("orientation") == "vertical" else "Horizontal"
+		rotation_value = getattr(warp_rotation_enum, rotation_name, None)
+		if rotation_value is not None:
+			_set_if_exists(layer, "set_warp_rotation", rotation_value)
 
 
 def _float_or_default(value: Any, default: float) -> float:

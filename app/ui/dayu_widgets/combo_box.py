@@ -12,6 +12,7 @@ from __future__ import print_function
 
 # Import third-party modules
 from PySide6 import QtCore
+from PySide6 import QtGui
 from PySide6 import QtWidgets
 
 # Import local modules
@@ -266,6 +267,52 @@ class MFontComboBox(MComboBoxSearchMixin, QtWidgets.QFontComboBox):
     def _update_selected_font_tooltip(self, family_name: str):
         if self.lineEdit() is not None:
             self.lineEdit().setToolTip(family_name or self.tr("Font"))
+
+    def set_priority_families(self, families):
+        """Move the given font families to the top of the list.
+
+        The families are placed first, in the order supplied, while every other
+        family keeps its existing (natural) order below them.
+        """
+        model = self.model()
+        if model is None or not families:
+            return
+
+        current = self.currentText()
+        blocked = self.blockSignals(True)
+        try:
+            if hasattr(model, "stringList") and hasattr(model, "setStringList"):
+                # QFontComboBox backs its items with a QStringListModel whose
+                # rows are the font family names.
+                names = list(model.stringList())
+                if not names:
+                    return
+                priority = [family for family in families if family in names]
+                if not priority:
+                    return
+                remaining = [name for name in names if name not in priority]
+                model.setStringList(priority + remaining)
+            elif isinstance(model, QtGui.QStandardItemModel):
+                target = 0
+                for family in families:
+                    source = -1
+                    for row in range(model.rowCount()):
+                        item = model.item(row, 0)
+                        if item is not None and item.text() == family:
+                            source = row
+                            break
+                    if source < 0:
+                        continue
+                    if source != target:
+                        model.insertRow(target, model.takeRow(source))
+                    target += 1
+        finally:
+            self.blockSignals(blocked)
+
+        if current:
+            index = self.findText(current)
+            if index >= 0:
+                self.setCurrentIndex(index)
 
     def get_dayu_size(self):
         """

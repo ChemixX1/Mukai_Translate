@@ -45,7 +45,7 @@ class LaMa(TorchAutocastMixin, InpaintModel):
 
     @staticmethod
     def is_downloaded() -> bool:
-        return ModelDownloader.is_downloaded(ModelID.LAMA_JIT)
+        return ModelDownloader.is_downloaded(ModelID.LAMA_ONNX)
 
     def forward(self, image, mask, config: Config):
         """Input image and output image have same size

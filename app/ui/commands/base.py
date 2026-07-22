@@ -202,24 +202,35 @@ class RectCommandBase:
         """Find a TextBlockItem in the scene matching the given properties"""
         for item in scene.items():
             if isinstance(item, TextBlockItem):
+                item_text_width = item.textWidth()
+                if item_text_width <= 0:
+                    item_text_width = item.document().size().width()
                 # Compare all relevant properties with is_close for numerical values
                 if (item.font_family == properties.font_family and
                     is_close(item.font_size, properties.font_size) and
                     item.text_color == properties.text_color and
                     item.alignment == properties.alignment and
                     is_close(item.line_spacing, properties.line_spacing) and
+                    is_close(
+                        getattr(item, 'letter_spacing', 0.0),
+                        getattr(properties, 'letter_spacing', 0.0),
+                    ) and
                     item.outline_color == properties.outline_color and
                     is_close(item.outline_width, properties.outline_width) and
                     item.bold == properties.bold and
+                    int(getattr(item, 'font_weight', 700 if item.bold else 400)) == int(properties.font_weight) and
                     item.italic == properties.italic and
                     item.underline == properties.underline and
+                    is_close(item.opacity(), properties.opacity) and
+                    getattr(item, 'get_fill_style', lambda: {})() == getattr(properties, 'fill_style', {}) and
+                    getattr(item, 'get_text_warp', lambda: {})() == getattr(properties, 'warp', {}) and
                     is_close(item.pos().x(), properties.position[0]) and
                     is_close(item.pos().y(), properties.position[1]) and
                     is_close(item.rotation(), properties.rotation) and
                     is_close(item.scale(), properties.scale) and
                     is_close(item.transformOriginPoint().x(), properties.transform_origin[0]) and
                     is_close(item.transformOriginPoint().y(), properties.transform_origin[1]) and
-                    is_close(item.boundingRect().width(), properties.width)):
+                    is_close(item_text_width, properties.width)):
                     return item
         return None
 

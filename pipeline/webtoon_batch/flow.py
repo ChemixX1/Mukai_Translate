@@ -9,6 +9,7 @@ import numpy as np
 from PIL import Image, UnidentifiedImageError
 
 from app.path_materialization import ensure_path_materialized
+from modules.ocr.processor import force_japanese_ocr_enabled
 from modules.utils.textblock import sort_blk_list
 from ..virtual_page import VirtualPage
 
@@ -348,7 +349,11 @@ class FlowMixin:
         blocks = list(page_accum[image_path]["blocks"])
         patches = list(page_accum[image_path]["patches"])
         source_lang = page_state.get("source_lang", self.main_page.s_combo.currentText())
-        source_lang_en = self.main_page.lang_mapping.get(source_lang, source_lang)
+        source_lang_en = (
+            "Japanese"
+            if force_japanese_ocr_enabled(self.main_page)
+            else self.main_page.lang_mapping.get(source_lang, source_lang)
+        )
         rtl = source_lang_en == "Japanese"
         if blocks:
             blocks = sort_blk_list(blocks, rtl)
@@ -612,7 +617,11 @@ class FlowMixin:
                                 page_accum[patch_path]["patches"].append(patch)
 
                 final_blocks_virtual = regular_blocks + split_owned_blocks
-                source_lang_en = self.main_page.lang_mapping.get(source_lang, source_lang)
+                source_lang_en = (
+                    "Japanese"
+                    if force_japanese_ocr_enabled(self.main_page)
+                    else self.main_page.lang_mapping.get(source_lang, source_lang)
+                )
                 rtl = source_lang_en == "Japanese"
                 final_blocks_virtual = (
                     sort_blk_list(final_blocks_virtual, rtl) if final_blocks_virtual else []

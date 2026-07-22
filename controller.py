@@ -33,6 +33,7 @@ from app.controllers.shortcuts import ShortcutController
 from app.controllers.task_runner import TaskRunnerController
 from app.controllers.batch_report import BatchReportController
 from app.controllers.manual_workflow import ManualWorkflowController
+from app.glossary import load_glossary_text, save_glossary_text
 from modules.utils.exceptions import InsufficientCreditsException, ContentFlaggedException
 
 
@@ -70,8 +71,13 @@ class ComicTranslate(ComicTranslateUI):
 
         # Explicitly set window icon to ensure it persists after splash screen
         current_file_dir = os.path.dirname(os.path.abspath(__file__))
-        icon_path = os.path.join(current_file_dir, 'resources', 'icons', 'icon.ico')
-        self.setWindowIcon(QIcon(icon_path))
+        svg_icon_path = os.path.join(current_file_dir, 'resources', 'icons', 'logo_mt.svg')
+        ico_icon_path = os.path.join(current_file_dir, 'resources', 'icons', 'icon.ico')
+        icon_path = svg_icon_path if os.path.exists(svg_icon_path) else ico_icon_path
+        app_icon = QIcon(icon_path)
+        self.setWindowIcon(app_icon)
+        if hasattr(self, 'title_bar'):
+            self.title_bar.set_icon(app_icon)
 
         self.blk_list: list[TextBlock] = []   
         self.curr_tblock: TextBlock = None
@@ -98,6 +104,7 @@ class ComicTranslate(ComicTranslateUI):
         self._manual_dirty = False
         self._dirty_revision = 0
         self._skip_close_prompt = False
+        self.force_japanese_ocr = False
 
         self.pipeline = ComicTranslatePipeline(self)
         try:
@@ -137,6 +144,7 @@ class ComicTranslate(ComicTranslateUI):
         self.download_event.connect(self.on_download_event)
 
         self.connect_ui_elements()
+        self.text_ctrl.apply_most_used_font_order()
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
 
         self.project_ctrl.load_main_page_settings()
@@ -198,6 +206,8 @@ class ComicTranslate(ComicTranslateUI):
         self.cancel_button.clicked.connect(self.cancel_current_task)
         self.batch_report_button.clicked.connect(self.show_latest_batch_report)
         self.set_all_button.clicked.connect(self.text_ctrl.set_src_trg_all)
+        self.japanese_ocr_button.toggled.connect(self.toggle_japanese_ocr)
+        self.glossary_button.clicked.connect(self.show_glossary_dialog)
         self.clear_rectangles_button.clicked.connect(self.image_viewer.clear_rectangles)
         self.clear_brush_strokes_button.clicked.connect(self.image_viewer.clear_brush_strokes)
         self.draw_blklist_blks.clicked.connect(self.restore_text_blocks)
@@ -221,6 +231,20 @@ class ComicTranslate(ComicTranslateUI):
         self.image_viewer.connect_text_item.connect(self.text_ctrl.connect_text_item_signals)
         self.image_viewer.page_changed.connect(self.webtoon_ctrl.on_page_changed)
         self.image_viewer.clear_text_edits.connect(self.text_ctrl.clear_text_edits)
+        self.image_viewer.watermark_stamped.connect(self.image_ctrl.save_current_image_state)
+        self.image_viewer.watermark_changed.connect(self.image_ctrl.save_current_image_state)
+        self.image_viewer.watermark_cleanup_region_selected.connect(
+            self.image_ctrl.on_watermark_cleanup_region_selected
+        )
+        self.image_viewer.watermark_cleanup_cancelled.connect(
+            self.image_ctrl.on_watermark_cleanup_cancelled
+        )
+        self.image_viewer.style_paint_target_requested.connect(
+            self.text_ctrl.apply_style_paint_target
+        )
+        self.image_viewer.style_paint_cancelled.connect(
+            self.text_ctrl.on_style_paint_cancelled
+        )
 
         try:
             if self._memlogger is not None:
@@ -230,18 +254,44 @@ class ComicTranslate(ComicTranslateUI):
 
         # Rendering
         self.font_dropdown.currentTextChanged.connect(self.text_ctrl.on_font_dropdown_change)
+        self.font_dropdown.textActivated.connect(self.text_ctrl.record_font_used)
         self.font_size_dropdown.currentTextChanged.connect(self.text_ctrl.on_font_size_change)
+        self.font_weight_action_group.triggered.connect(
+            lambda action: self.text_ctrl.on_font_weight_change(action.data())
+        )
         self.line_spacing_dropdown.currentTextChanged.connect(self.text_ctrl.on_line_spacing_change)
-        self.block_font_color_button.clicked.connect(self.text_ctrl.on_font_color_change)
+        self.letter_spacing_spinbox.valueChanged.connect(
+            self.text_ctrl.on_letter_spacing_change
+        )
+        self.letter_spacing_slider.sliderPressed.connect(
+            lambda: self.text_ctrl.begin_typography_adjustment("letter_spacing")
+        )
+        self.letter_spacing_slider.sliderReleased.connect(
+            self.text_ctrl.end_typography_adjustment
+        )
+        self.line_spacing_slider.sliderPressed.connect(
+            lambda: self.text_ctrl.begin_typography_adjustment("line_spacing")
+        )
+        self.line_spacing_slider.sliderReleased.connect(
+            self.text_ctrl.end_typography_adjustment
+        )
+        self.text_opacity_slider.sliderReleased.connect(self.text_ctrl.on_text_opacity_change)
+        self.style_copy_button.clicked.connect(self.text_ctrl.begin_style_paint)
+        self.apply_style_action.triggered.connect(self.text_ctrl.apply_copied_text_style)
+        self.quick_text_button.clicked.connect(self.text_ctrl.add_quick_text_box)
         self.alignment_tool_group.get_button_group().buttons()[0].clicked.connect(self.text_ctrl.left_align)
         self.alignment_tool_group.get_button_group().buttons()[1].clicked.connect(self.text_ctrl.center_align)
         self.alignment_tool_group.get_button_group().buttons()[2].clicked.connect(self.text_ctrl.right_align)
+        self.alignment_tool_group.get_button_group().buttons()[3].clicked.connect(self.text_ctrl.justify_align)
         self.bold_button.clicked.connect(self.text_ctrl.bold)
         self.italic_button.clicked.connect(self.text_ctrl.italic)
         self.underline_button.clicked.connect(self.text_ctrl.underline)
+        self.uppercase_button.clicked.connect(self.text_ctrl.to_uppercase)
         self.outline_font_color_button.clicked.connect(self.text_ctrl.on_outline_color_change)
         self.outline_width_dropdown.currentTextChanged.connect(self.text_ctrl.on_outline_width_change)
         self.outline_checkbox.stateChanged.connect(self.text_ctrl.toggle_outline_settings)
+        self.watermark_button.clicked.connect(self.image_ctrl.on_watermark_clicked)
+        self.clean_watermark_button.clicked.connect(self.image_ctrl.on_clean_watermark_clicked)
 
         # Page List
         self.page_list.currentItemChanged.connect(self.image_ctrl.on_page_list_current_item_changed)
@@ -250,6 +300,8 @@ class ComicTranslate(ComicTranslateUI):
         self.page_list.insert_browser.sig_files_changed.connect(self.image_ctrl.thread_insert)
         self.page_list.toggle_skip_img.connect(self.image_ctrl.handle_toggle_skip_images)
         self.page_list.translate_imgs.connect(self.batch_translate_selected)
+        self.page_list.replace_img.connect(self.image_ctrl.request_single_image_replacement)
+        self.replace_all_images_button.clicked.connect(self.image_ctrl.request_bulk_image_replacement)
 
         # New project and safety confirmations
         self.new_project_button.clicked.connect(self._on_new_project_clicked)
@@ -262,6 +314,66 @@ class ComicTranslate(ComicTranslateUI):
         self.startup_home._sig_pin.connect(
             lambda path, pinned: self.project_ctrl.toggle_pin_project(path, pinned)
         )
+
+    def _set_japanese_ocr_tooltip(self) -> None:
+        if self.force_japanese_ocr:
+            text = "OCR japones activado: usa MangaOCR aunque el idioma fuente sea otro."
+        else:
+            text = "OCR japones desactivado."
+        self.japanese_ocr_button.setToolTip(text)
+
+    def toggle_japanese_ocr(self, checked: bool) -> None:
+        self.force_japanese_ocr = bool(checked)
+        settings = QtCore.QSettings("ComicLabs", "ComicTranslate")
+        settings.beginGroup("main_page")
+        settings.setValue("force_japanese_ocr", self.force_japanese_ocr)
+        settings.endGroup()
+        self._set_japanese_ocr_tooltip()
+
+        cache_manager = getattr(getattr(self, "pipeline", None), "cache_manager", None)
+        if cache_manager is not None:
+            cache_manager.clear_ocr_cache()
+
+    def show_glossary_dialog(self) -> None:
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Glosario")
+        dialog.resize(560, 360)
+
+        layout = QtWidgets.QVBoxLayout(dialog)
+        instructions = QtWidgets.QLabel(
+            "Una entrada por linea. Formatos validos: original => traduccion, "
+            "original = traduccion, original | traduccion o tabulado."
+        )
+        instructions.setWordWrap(True)
+
+        editor = QtWidgets.QPlainTextEdit(dialog)
+        editor.setPlainText(load_glossary_text())
+        editor.setPlaceholderText("Nombre original => Nombre final\nTermino original => Termino final")
+
+        button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Save
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+
+        layout.addWidget(instructions)
+        layout.addWidget(editor)
+        layout.addWidget(button_box)
+
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+
+        old_text = load_glossary_text()
+        new_text = editor.toPlainText()
+        if new_text == old_text:
+            return
+
+        save_glossary_text(new_text)
+        cache_manager = getattr(getattr(self, "pipeline", None), "cache_manager", None)
+        if cache_manager is not None:
+            cache_manager.clear_translation_cache()
+        MMessage.success("Glosario guardado.", parent=self, duration=2)
 
     def _guarded_thread_load_images(self, paths: list[str]):
         """Wrap thread_load_images with unsaved-project confirmation and clear state."""
@@ -446,7 +558,10 @@ class ComicTranslate(ComicTranslateUI):
         return targets
 
     def delete_selected_box(self):
-        targets = [target for target in self._selected_delete_targets() if target[2] is not None]
+        # A manually added text box has no OCR block.  It is still a complete
+        # editable item and must be deletable (and undoable) like translated
+        # boxes and detection rectangles.
+        targets = self._selected_delete_targets()
         if not targets:
             return
 

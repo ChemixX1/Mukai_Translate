@@ -105,7 +105,20 @@ class NavRailMixin:
         self.export_psd_folder_browser = MClickBrowserFolderToolButton(multiple=False)
 
         self.export_menu = MMenu(parent=self)
-        self.export_menu.setMinimumWidth(80)
+        self.export_menu.setMinimumWidth(190)
+        export_png_action = self.export_menu.addAction(
+            MIcon("ion--image-outline.svg"),
+            self.tr("Images PNG"),
+        )
+        export_png_action.triggered.connect(lambda: self._export_images_as("png"))
+
+        export_jpg_action = self.export_menu.addAction(
+            MIcon("ion--image-outline.svg"),
+            self.tr("Images JPG"),
+        )
+        export_jpg_action.triggered.connect(lambda: self._export_images_as("jpg"))
+        self.export_menu.addSeparator()
+
         export_archive_action = self.export_menu.addAction(
             MIcon("flowbite--file-zip-outline.svg"),
             self.tr("ZIP"),
@@ -153,6 +166,8 @@ class NavRailMixin:
         ]
         nav_tool_group.set_button_list(nav_tools)
         nav_buttons = nav_tool_group.get_button_group().buttons()
+        for nav_button in nav_buttons:
+            nav_button.setProperty("neutralCheckVisual", True)
         self.nav_tool_group = nav_tool_group
         self.startup_nav_button = nav_buttons[0]
         self.home_nav_button = nav_buttons[1]
@@ -200,6 +215,11 @@ class NavRailMixin:
         nav_rail_layout.addWidget(nav_tool_group)
         nav_rail_layout.addStretch()
         nav_rail_layout.setContentsMargins(0, 0, 0, 0)
+        for index in range(nav_rail_layout.count()):
+            widget = nav_rail_layout.itemAt(index).widget()
+            if isinstance(widget, MToolButton):
+                widget.setProperty("neutralCheckVisual", True)
+                widget._polish_icon()
 
         return nav_rail_layout
 
@@ -282,6 +302,12 @@ class NavRailMixin:
         if project_ctrl is None or not hasattr(project_ctrl, "start_export_as"):
             return
         project_ctrl.start_export_as(extension)
+
+    def _export_images_as(self, page_format: str):
+        project_ctrl = getattr(self, "project_ctrl", None)
+        if project_ctrl is None or not hasattr(project_ctrl, "start_export_images"):
+            return
+        project_ctrl.start_export_images(page_format)
 
     def _on_export_psd_requested(self):
         project_ctrl = getattr(self, "project_ctrl", None)

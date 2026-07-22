@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import imkit as imk
 import numpy as np
 from typing import TYPE_CHECKING, List
@@ -8,7 +9,7 @@ from PySide6 import QtCore, QtWidgets, QtGui
 
 from app.ui.dayu_widgets.message import MMessage
 from app.ui.messages import Messages
-from app.ui.commands.image import SetImageCommand, ToggleSkipImagesCommand
+from app.ui.commands.image import ReplaceImagePixelsCommand, SetImageCommand, ToggleSkipImagesCommand
 from app.ui.commands.inpaint import PatchInsertCommand
 from app.ui.commands.inpaint import PatchCommandBase
 from app.ui.commands.box import AddTextItemCommand
@@ -22,6 +23,8 @@ if TYPE_CHECKING:
 
 
 class ImageStateController:
+    REPLACEMENT_IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp)"
+
     def __init__(self, main: ComicTranslate):
         self.main = main
         self._nav_request_id = 0
@@ -32,11 +35,217 @@ class ImageStateController:
         self._suppress_dismiss_message_ids: set[int] = set()
         self._active_transient_skip_message: MMessage | None = None
         self._force_default_view_once = False
+        self._watermark_cleanup_running = False
         
         # Initialize lazy image loader for list view
         self.page_list_loader = ListViewImageLoader(
             self.main.page_list,
             avatar_size=(35, 50)
+        )
+
+    def _watermark_path(self) -> str | None:
+        """Locate the watermark image shipped with the project.
+
+        The canonical asset is stored with the other application resources;
+        the old root path remains only as a compatibility fallback.
+        """
+        project_root = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+        candidates = [
+            os.path.join(project_root, "resources", "static", "watermark.png"),
+            os.path.join(project_root, "resources", "static", "marca de agua.png"),
+            os.path.join(project_root, "marca de agua.png"),
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        return None
+
+    def on_watermark_clicked(self):
+        """Start click-to-stamp placement of the project watermark.
+
+        The watermark preview follows the cursor so the user can drop it
+        anywhere on the page with a left click. Right-click cancels. Once
+        stamped it stays freely movable (drag it, or press Delete to remove).
+        """
+        viewer = self.main.image_viewer
+        if not viewer.hasPhoto():
+            MMessage.warning(
+                self.main.tr("Open an image before adding a watermark."),
+                parent=self.main,
+                duration=2,
+            )
+            return
+
+        if getattr(viewer, "webtoon_mode", False):
+            MMessage.warning(
+                self.main.tr("Watermarks are only available in regular image mode."),
+                parent=self.main,
+                duration=2,
+            )
+            return
+
+        # Toggle off if the user clicks the button again while placing.
+        if viewer.is_placing_watermark:
+            viewer.cancel_watermark_placement()
+            return
+
+        path = self._watermark_path()
+        if not path:
+            MMessage.warning(
+                self.main.tr("Watermark image not found."),
+                parent=self.main,
+                duration=2,
+            )
+            return
+
+        if not viewer.start_watermark_placement(path):
+            MMessage.warning(
+                self.main.tr("Could not load the watermark image."),
+                parent=self.main,
+                duration=2,
+            )
+            return
+
+        MMessage.info(
+            self.main.tr("Click on the page to place the watermark (right-click to cancel)."),
+            parent=self.main,
+            duration=3,
+        )
+
+    def on_clean_watermark_clicked(self):
+        viewer = self.main.image_viewer
+        if viewer.is_selecting_watermark_cleanup():
+            viewer.cancel_watermark_cleanup_selection(notify=False)
+            self._set_clean_watermark_button(active=False)
+        if not viewer.hasPhoto():
+            self._set_clean_watermark_button(active=False)
+            MMessage.warning(
+                self.main.tr("Open an image before cleaning a watermark."),
+                parent=self.main,
+                duration=2,
+            )
+            return
+
+        if getattr(viewer, "webtoon_mode", False):
+            self._set_clean_watermark_button(active=False)
+            MMessage.warning(
+                self.main.tr("Watermark cleaning is only available in regular image mode."),
+                parent=self.main,
+                duration=2,
+            )
+            return
+
+        if self._watermark_cleanup_running:
+            self._set_clean_watermark_button(active=False)
+            return
+
+        if viewer.is_placing_watermark:
+            viewer.cancel_watermark_placement()
+
+        # This is a true toggle: a second press or a right-click exits the
+        # selection mode before any pixels are altered.
+        if viewer.is_selecting_watermark_cleanup():
+            viewer.cancel_watermark_cleanup_selection(notify=False)
+            self._set_clean_watermark_button(active=False)
+            return
+
+        viewer.start_watermark_cleanup_selection()
+        self._set_clean_watermark_button(active=True)
+        MMessage.info(
+            self.main.tr("Drag a rectangle over the watermark. Right-click or press the button again to cancel."),
+            parent=self.main,
+            duration=4,
+        )
+
+    def on_watermark_cleanup_cancelled(self):
+        self._set_clean_watermark_button(active=False)
+
+    def on_watermark_cleanup_region_selected(self, rect: QtCore.QRectF):
+        """Run the configured inpainter on the user-selected rectangle only."""
+        self._set_clean_watermark_button(active=False)
+        viewer = self.main.image_viewer
+        source_file = self._current_file_path()
+        if source_file is None or self._watermark_cleanup_running:
+            return
+
+        image = viewer.get_image_array(paint_all=False, include_patches=True)
+        if image is None:
+            MMessage.warning(
+                self.main.tr("Could not read the current image."),
+                parent=self.main,
+                duration=2,
+            )
+            return
+
+        image_height, image_width = image.shape[:2]
+        selected = rect.toAlignedRect().intersected(QtCore.QRect(0, 0, image_width, image_height))
+        if selected.width() < 4 or selected.height() < 4:
+            MMessage.warning(
+                self.main.tr("Select a larger area around the watermark."),
+                parent=self.main,
+                duration=2,
+            )
+            return
+
+        self.save_current_image_state()
+        self.main.text_ctrl.clear_text_edits()
+        self._watermark_cleanup_running = True
+        button = getattr(self.main, "clean_watermark_button", None)
+        if button is not None:
+            button.setEnabled(False)
+        self.main.loading.setVisible(True)
+        MMessage.info(
+            self.main.tr("Cleaning the selected watermark area…"),
+            parent=self.main,
+            duration=3,
+        )
+
+        region = (selected.x(), selected.y(), selected.width(), selected.height())
+        input_image = image.copy()
+
+        def _run():
+            patches = self.main.pipeline.inpainting.inpaint_region(input_image, region)
+            return source_file, patches
+
+        self.main.run_threaded(
+            _run,
+            self._on_watermark_cleanup_done,
+            self.main.default_error_handler,
+            self._finish_clean_watermark,
+        )
+
+    def _set_clean_watermark_button(self, active: bool) -> None:
+        button = getattr(self.main, "clean_watermark_button", None)
+        if button is not None:
+            button.setChecked(active)
+
+    def _finish_clean_watermark(self):
+        self._watermark_cleanup_running = False
+        button = getattr(self.main, "clean_watermark_button", None)
+        if button is not None:
+            button.setEnabled(True)
+        self.main.loading.setVisible(False)
+
+    def _on_watermark_cleanup_done(self, payload):
+        source_file, patches = payload
+        if source_file not in self.main.image_files or not patches:
+            MMessage.warning(
+                self.main.tr("No pixels were generated for the selected area."),
+                parent=self.main,
+                duration=2,
+            )
+            return
+
+        self.on_inpaint_patches_processed(patches, source_file)
+        if source_file == self._current_file_path():
+            self.save_current_image_state()
+
+        MMessage.info(
+            self.main.tr("Selected watermark area cleaned."),
+            parent=self.main,
+            duration=2,
         )
 
     def _default_export_group_name(self, file_path: str) -> str:
@@ -245,6 +454,156 @@ class ImageStateController:
             return self.main.image_files[self.main.curr_img_idx]
         return None
 
+    @staticmethod
+    def _natural_path_key(file_path: str):
+        """Sort replacement files as people expect: page_2 before page_10."""
+        name = os.path.basename(file_path).casefold()
+        return [
+            f"{int(part):020d}" if part.isdigit() else part
+            for part in re.split(r"(\d+)", name)
+        ]
+
+    def request_single_image_replacement(self, file_path: str):
+        """Pick one new background image without changing its text layer."""
+        if file_path not in self.main.image_files:
+            return
+
+        replacement_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self.main,
+            self.main.tr("Select replacement image"),
+            "",
+            self.main.tr(self.REPLACEMENT_IMAGE_FILTER),
+        )
+        if replacement_path:
+            self._start_image_replacement([(file_path, replacement_path)])
+
+    def request_bulk_image_replacement(self):
+        """Pick one replacement per page, pairing both collections in natural order."""
+        target_paths = list(self.main.image_files)
+        if not target_paths:
+            MMessage.warning(
+                self.main.tr("Open images before replacing them."),
+                parent=self.main,
+                duration=3,
+            )
+            return
+
+        replacement_paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self.main,
+            self.main.tr("Select replacement images"),
+            "",
+            self.main.tr(self.REPLACEMENT_IMAGE_FILTER),
+        )
+        if not replacement_paths:
+            return
+
+        replacement_paths = sorted(replacement_paths, key=self._natural_path_key)
+        if len(replacement_paths) != len(target_paths):
+            MMessage.warning(
+                self.main.tr(
+                    "Select exactly {expected} replacement images; {received} were selected."
+                ).format(expected=len(target_paths), received=len(replacement_paths)),
+                parent=self.main,
+                duration=5,
+            )
+            return
+
+        self._start_image_replacement(list(zip(target_paths, replacement_paths)))
+
+    def _save_states_before_image_replacement(self):
+        """Commit live text-item edits before changing any underlying pixels."""
+        self.main.text_ctrl.clear_text_edits()
+        viewer = self.main.image_viewer
+        if viewer.webtoon_mode:
+            try:
+                viewer.webtoon_manager.scene_item_manager.save_loaded_scene_items_to_states()
+            except Exception:
+                # The regular current-page save still protects the active page
+                # if a partially initialized webtoon viewer cannot save yet.
+                self.save_current_image_state()
+        else:
+            self.save_current_image_state()
+
+    def _start_image_replacement(self, replacements: list[tuple[str, str]]):
+        if not replacements:
+            return
+
+        self._save_states_before_image_replacement()
+        self.main.loading.setVisible(True)
+        self.main.disable_hbutton_group()
+        self.main.replace_all_images_button.setEnabled(False)
+
+        def on_error(error_tuple):
+            self.main.default_error_handler(error_tuple)
+
+        def on_finished():
+            self.main.replace_all_images_button.setEnabled(True)
+            self.main.on_manual_finished()
+
+        self.main.run_threaded(
+            self._load_replacement_images,
+            self._apply_replacement_images,
+            on_error,
+            on_finished,
+            replacements,
+        )
+
+    def _load_replacement_images(self, replacements: list[tuple[str, str]]):
+        """Read and validate every image first so a bulk replacement is atomic."""
+        loaded_replacements = []
+        for target_path, replacement_path in replacements:
+            ensure_path_materialized(replacement_path)
+            replacement_image = imk.read_image(replacement_path)
+            current_image = self.load_image(target_path)
+
+            if replacement_image is None:
+                raise ValueError(f"Could not read replacement image: {replacement_path}")
+            if current_image is None:
+                raise ValueError(f"Could not read current image: {target_path}")
+            if replacement_image.ndim != 3 or replacement_image.shape[2] != 3:
+                raise ValueError(
+                    f"Replacement image must be RGB: {os.path.basename(replacement_path)}"
+                )
+            if replacement_image.shape[:2] != current_image.shape[:2]:
+                expected_height, expected_width = current_image.shape[:2]
+                actual_height, actual_width = replacement_image.shape[:2]
+                raise ValueError(
+                    "Replacement image dimensions do not match for "
+                    f"{os.path.basename(target_path)}. Expected "
+                    f"{expected_width}x{expected_height}, received "
+                    f"{actual_width}x{actual_height}."
+                )
+
+            loaded_replacements.append((target_path, replacement_image))
+
+        return loaded_replacements
+
+    def _apply_replacement_images(self, replacements: list[tuple[str, np.ndarray]]):
+        for file_path, replacement_image in replacements:
+            command = ReplaceImagePixelsCommand(
+                self.main,
+                file_path,
+                replacement_image,
+                text=self.main.tr("Replace image"),
+                clear_inpaint_patches=True,
+            )
+            stack = self.main.undo_stacks.get(file_path)
+            if stack:
+                stack.push(command)
+            else:
+                command.redo()
+
+        if replacements:
+            self.main.mark_project_dirty()
+            count = len(replacements)
+            MMessage.success(
+                self.main.tr("{count} image(s) replaced. Translated text boxes were kept.").format(
+                    count=count
+                ),
+                parent=self.main,
+                duration=4,
+            )
+
     def load_initial_image(self, file_paths: List[str]):
         file_paths = self.main.file_handler.prepare_files(file_paths)
         self.main.image_files = file_paths
@@ -296,6 +655,7 @@ class ImageStateController:
         self.main.displayed_images.clear()
         self.main.image_viewer.clear_rectangles(page_switch=True)
         self.main.image_viewer.clear_brush_strokes(page_switch=True)
+        self.main.image_viewer.clear_watermarks()
         self.main.s_text_edit.clear()
         self.main.t_text_edit.clear()
         self.main.image_viewer.clear_text_items()
@@ -1089,12 +1449,14 @@ class ImageStateController:
                     viewer.clear_rectangles(page_switch=True)
                     viewer.clear_brush_strokes(page_switch=True)
                     viewer.clear_text_items()
+                    viewer.clear_watermarks()
                     needs_default_fit = True
             else:
                 self.main.blk_list = []
                 viewer.clear_rectangles(page_switch=True)
                 viewer.clear_brush_strokes(page_switch=True)
                 viewer.clear_text_items()
+                viewer.clear_watermarks()
                 needs_default_fit = True
 
             self.main.text_ctrl.clear_text_edits()

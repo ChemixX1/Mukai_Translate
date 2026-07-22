@@ -7,8 +7,8 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from app.ui.canvas.image_viewer import ImageViewer
 from app.ui.dayu_widgets import dayu_theme
-from app.ui.dayu_widgets.divider import MDivider
 from app.ui.dayu_widgets.theme import MTheme
+from app.ui.dayu_widgets.tool_button import MToolButton
 from app.ui.list_view import PageListView
 from app.ui.settings.settings_page import SettingsPage
 from app.ui.startup_home import StartupHomeScreen
@@ -92,6 +92,7 @@ class ComicTranslateUI(
         self.page_list = PageListView()
 
         self.webtoon_mode = False
+        self._is_dark_theme = True
 
         self.grabGesture(QtCore.Qt.GestureType.PanGesture)
         self.grabGesture(QtCore.Qt.GestureType.PinchGesture)
@@ -132,6 +133,7 @@ class ComicTranslateUI(
             0: QtCore.Qt.AlignmentFlag.AlignLeft,
             1: QtCore.Qt.AlignmentFlag.AlignCenter,
             2: QtCore.Qt.AlignmentFlag.AlignRight,
+            3: QtCore.Qt.AlignmentFlag.AlignJustify,
         }
 
         self._init_ui()
@@ -140,7 +142,7 @@ class ComicTranslateUI(
             QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
         )
         self._settings_resize_preview.setScaledContents(True)
-        self._settings_resize_preview.setStyleSheet("background-color: #323232;")
+        self._settings_resize_preview.setStyleSheet("background-color: #131925;")
         self._settings_resize_preview.hide()
         self._settings_resize_active = False
         self._settings_resize_settle_timer = QtCore.QTimer(self)
@@ -161,19 +163,30 @@ class ComicTranslateUI(
         self._edge_resizer = EdgeResizer(self)
 
         main_widget = QtWidgets.QWidget()
+        main_widget.setObjectName("mainShell")
+        self.main_shell = main_widget
         self.main_layout = QtWidgets.QHBoxLayout()
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
         main_widget.setLayout(self.main_layout)
         outer_layout.addWidget(main_widget)
 
         self.setCentralWidget(outer_widget)
 
         nav_rail_layout = self._create_nav_rail()
-        self.main_layout.addLayout(nav_rail_layout)
-        self.main_layout.addWidget(MDivider(orientation=QtCore.Qt.Vertical))
+        self.nav_rail_widget = QtWidgets.QWidget(main_widget)
+        self.nav_rail_widget.setObjectName("navRail")
+        self.nav_rail_widget.setLayout(nav_rail_layout)
+        self.main_layout.addWidget(self.nav_rail_widget)
+        self.nav_rail_divider = QtWidgets.QFrame(main_widget)
+        self.nav_rail_divider.setObjectName("navRailDivider")
+        self.nav_rail_divider.setFixedWidth(1)
+        self.main_layout.addWidget(self.nav_rail_divider)
 
         self.main_content_widget = self._create_main_content()
         self.title_bar.set_undo_redo_widget(self.undo_tool_group)
         self._center_stack = QtWidgets.QStackedWidget()
+        self._center_stack.setObjectName("mainCenterStack")
 
         self.startup_home = StartupHomeScreen()
         self._center_stack.addWidget(self.startup_home)
@@ -410,25 +423,88 @@ class ComicTranslateUI(
         if not hasattr(self, "title_bar"):
             return
         light = (theme == self.settings_page.ui.tr("Light")) if hasattr(self, "settings_page") else False
+        black = (theme == self.settings_page.ui.tr("Black")) if hasattr(self, "settings_page") else False
         if light:
             self.title_bar.apply_style(bg="#f0f0f0", fg="#1a1a1a", hover="rgba(0,0,0,25)")
+        elif black:
+            self.title_bar.apply_style(bg="#000000", fg="#FFFFFF", hover="#242424")
         else:
-            self.title_bar.apply_style(bg="#2b2b2b", fg="#e8e8e8", hover="rgba(255,255,255,30)")
+            self.title_bar.apply_style(bg="#0F141D", fg="#F5F7FA", hover="#1A314F")
 
     def apply_theme(self, theme: str):
-        if theme == self.settings_page.ui.tr("Light"):
-            dayu_theme.set_primary_color(MTheme.blue)
+        light_theme = self.settings_page.ui.tr("Light")
+        black_theme = self.settings_page.ui.tr("Black")
+        if theme == light_theme:
+            dayu_theme.set_primary_color(MTheme.mukai_light_pink)
             dayu_theme.set_theme("light")
             is_dark = False
+            self._theme_variant = "light"
+        elif theme == black_theme:
+            dayu_theme.set_primary_color("#FFFFFF")
+            dayu_theme.set_theme("black")
+            is_dark = True
+            self._theme_variant = "black"
         else:
-            dayu_theme.set_primary_color(MTheme.yellow)
+            dayu_theme.set_primary_color(MTheme.mukai_dark_blue)
             dayu_theme.set_theme("dark")
             is_dark = True
+            self._theme_variant = "blue"
 
         dayu_theme.apply(self)
+        self._is_dark_theme = is_dark
+        for tool_button in self.findChildren(MToolButton):
+            tool_button._polish_icon()
         self._apply_title_bar_style(theme)
+        is_black = self._theme_variant == "black"
+        shell_bg = "#000000" if is_black else (
+            "#0B0F19" if is_dark else dayu_theme.background_color
+        )
+        nav_bg = "#000000" if is_black else (
+            "#111621" if is_dark else dayu_theme.background_color
+        )
+        if hasattr(self, "main_shell"):
+            self.main_shell.setStyleSheet(
+                f"QWidget#mainShell {{ background: {shell_bg}; }}"
+            )
+        if hasattr(self, "nav_rail_widget"):
+            self.nav_rail_widget.setStyleSheet(f"""
+                QWidget#navRail {{
+                    background: {nav_bg};
+                    border: none;
+                }}
+                QWidget#navRail QToolButton,
+                QWidget#navRail QToolButton:hover,
+                QWidget#navRail QToolButton:checked {{
+                    background: transparent;
+                    border: none;
+                }}
+            """)
+        if hasattr(self, "nav_rail_divider"):
+            divider_color = (
+                "#262626" if is_black else ("#1D2430" if is_dark else "#D8DAE0")
+            )
+            self.nav_rail_divider.setStyleSheet(
+                f"QFrame#navRailDivider {{ background: {divider_color}; border: none; }}"
+            )
+        if hasattr(self, "_center_stack"):
+            self._center_stack.setStyleSheet(
+                f"QStackedWidget#mainCenterStack {{ background: {shell_bg}; }}"
+            )
 
         if self.startup_home:
             self.startup_home.apply_theme(is_dark)
+        if hasattr(self, "image_viewer"):
+            self.image_viewer.apply_theme(is_dark)
+        if hasattr(self, "text_effects_panel"):
+            self.text_effects_panel.apply_theme(is_dark)
+        if hasattr(self, "_apply_workspace_theme"):
+            self._apply_workspace_theme(is_dark)
+        if hasattr(self, "_settings_resize_preview"):
+            preview_bg = "#000000" if is_black else (
+                "#131925" if is_dark else "#ffffff"
+            )
+            self._settings_resize_preview.setStyleSheet(
+                f"background-color: {preview_bg};"
+            )
 
         self.repaint()

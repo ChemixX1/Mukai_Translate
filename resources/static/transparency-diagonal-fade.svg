@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24">
+  <g fill="#555555">
+    <rect x="2" y="2" width="4" height="4" rx=".7"/>
+    <rect x="8" y="2" width="4" height="4" rx=".7" opacity=".78"/>
+    <rect x="14" y="2" width="4" height="4" rx=".7" opacity=".48"/>
+    <rect x="20" y="2" width="2" height="4" rx=".6" opacity=".2"/>
+    <rect x="2" y="8" width="4" height="4" rx=".7" opacity=".94"/>
+    <rect x="8" y="8" width="4" height="4" rx=".7" opacity=".68"/>
+    <rect x="14" y="8" width="4" height="4" rx=".7" opacity=".38"/>
+    <rect x="20" y="8" width="2" height="4" rx=".6" opacity=".14"/>
+    <rect x="2" y="14" width="4" height="4" rx=".7" opacity=".8"/>
+    <rect x="8" y="14" width="4" height="4" rx=".7" opacity=".52"/>
+    <rect x="14" y="14" width="4" height="4" rx=".7" opacity=".25"/>
+    <rect x="20" y="14" width="2" height="4" rx=".6" opacity=".08"/>
+    <rect x="2" y="20" width="4" height="2" rx=".6" opacity=".58"/>
+    <rect x="8" y="20" width="4" height="2" rx=".6" opacity=".32"/>
+    <rect x="14" y="20" width="4" height="2" rx=".6" opacity=".14"/>
+  </g>
+</svg>

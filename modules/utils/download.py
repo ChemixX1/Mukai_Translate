@@ -91,6 +91,7 @@ class ModelID(Enum):
     # Font Detection
     FONT_DETECTOR_ONNX = "font-detector-onnx"
     FONT_DETECTOR_TORCH = "font-detector-torch"
+    SAM_VIT_B = "sam-vit-b"
 
 
 @dataclass(frozen=True)
@@ -384,9 +385,11 @@ def _register_defaults():
     # Inpainting: MIGAN pipeline ONNX (single file)
     ModelDownloader.register(ModelSpec(
         id=ModelID.MIGAN_PIPELINE_ONNX,
-        url='https://github.com/Sanster/models/releases/download/migan/',
+        # Official pre-converted pipeline linked by the MI-GAN authors.
+        # The previous Sanster release URL was removed and now returns 404.
+        url='https://huggingface.co/andraniksargsyan/migan/resolve/main/',
         files=['migan_pipeline_v2.onnx'],
-        sha256=[None],  # GitHub release no sha256 provided; could be added later
+        sha256=['6f1f3530a1a2324b19752018ce756088b07973cda8d7d890034ace5c8a48c40b'],
         save_dir=os.path.join(models_base_dir, 'inpainting')
     ))
 
@@ -611,6 +614,15 @@ def _register_defaults():
         files=['ch_ppocr_mobile_v2.0_cls_infer.onnx'],
         sha256=['e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c'],
         save_dir=os.path.join(models_base_dir, 'ocr', 'ppocr-v5-onnx')
+    ))
+
+    # Optional Magic Eraser segmentation model. It is downloaded only on demand.
+    ModelDownloader.register(ModelSpec(
+        id=ModelID.SAM_VIT_B,
+        url='https://dl.fbaipublicfiles.com/segment_anything/',
+        files=['sam_vit_b_01ec64.pth'],
+        sha256=[None],
+        save_dir=os.path.join(models_base_dir, 'segmentation', 'sam')
     ))
 
     # Font Detection

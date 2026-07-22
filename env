@@ -1,18 +1,38 @@
-# ==========================================
-# CLAVES DE IA PARA MANGA IMAGE TRANSLATOR
-# ==========================================
+# MukaiTranslator API keys
+# Fill only the providers you use. Settings UI values take priority.
 
-# 1. Google Gemini
-GEMINI_API_KEY=""
-GEMINI_MODEL=gemini-3.1-flash-lite-preview
-
-# 2. OpenAI (ChatGPT)
+# OpenAI / GPT
 OPENAI_API_KEY=""
 
-# 3. DeepSeek
+# Google Gemini
+GEMINI_API_KEY=""
+GOOGLE_API_KEY=""
+
+# Anthropic Claude
+ANTHROPIC_API_KEY=""
+CLAUDE_API_KEY=""
+
+# DeepSeek
 DEEPSEEK_API_KEY=""
 
-# 4. Grok (xAI)
+# xAI Grok
+GROK_API_KEY=""
+XAI_API_KEY=""
+
+# Custom OpenAI-compatible endpoint
 CUSTOM_OPENAI_API_KEY=""
-CUSTOM_OPENAI_API_BASE=https://api.x.ai/v1
-CUSTOM_OPENAI_MODEL=grok-4-1-fast-reasoning
+CUSTOM_OPENAI_API_BASE=""
+CUSTOM_OPENAI_MODEL=""
+
+# Microsoft Azure OCR / Translator
+AZURE_VISION_API_KEY=""
+AZURE_VISION_ENDPOINT=""
+AZURE_TRANSLATOR_API_KEY=""
+AZURE_TRANSLATOR_REGION=""
+
+# Google Cloud Vision
+GOOGLE_CLOUD_API_KEY=""
+
+# Yandex
+YANDEX_API_KEY=""
+YANDEX_FOLDER_ID=""

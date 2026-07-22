@@ -114,6 +114,10 @@ class ComicTranslatePipeline:
         """Perform inpainting and return patches."""
         return self.inpainting.inpaint()
 
+    def magic_eraser_inpaint(self):
+        """Refine the user mask with SAM before using the selected inpainter."""
+        return self.inpainting.magic_eraser_inpaint()
+
     def get_selected_block(self):
         """Get the currently selected text block."""
         rect = self.main_page.image_viewer.selected_rect

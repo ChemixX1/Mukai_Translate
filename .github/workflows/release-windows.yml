@@ -1,0 +1,68 @@
+name: Publish Windows Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v5
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Verify tag matches application version
+        shell: pwsh
+        run: |
+          $source = Get-Content -LiteralPath "app/version.py" -Raw
+          if ($source -notmatch '__version__\s*=\s*["'']([^"'']+)["'']') {
+            throw "Could not read app/version.py"
+          }
+          $version = $Matches[1]
+          $tagVersion = $env:GITHUB_REF_NAME.TrimStart("v")
+          if ($version -ne $tagVersion) {
+            throw "Tag $env:GITHUB_REF_NAME does not match app version $version"
+          }
+          "MUKAI_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install application and build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress --yes
+
+      - name: Build and verify customer packages
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/build_windows_release.ps1 -Installer
+
+      - name: Publish immutable GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $releaseDir = "releases/$env:MUKAI_VERSION"
+          $installer = "$releaseDir/MukaiTranslator-Setup-$env:MUKAI_VERSION.exe"
+          $portable = "$releaseDir/MukaiTranslator-Portable-$env:MUKAI_VERSION.zip"
+          $manifest = "$releaseDir/release-manifest.json"
+          gh release create $env:GITHUB_REF_NAME $installer $portable $manifest `
+            --verify-tag `
+            --generate-notes `
+            --title "Mukai Translator $env:MUKAI_VERSION"

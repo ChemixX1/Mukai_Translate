@@ -6,7 +6,7 @@ import numpy as np
 from typing import TYPE_CHECKING
 
 from PySide6 import QtCore
-from PySide6.QtGui import QColor, QTextCursor
+from PySide6.QtGui import QColor, QCursor, QTextCursor
 
 from app.ui.commands.textformat import TextFormatCommand
 from app.ui.commands.box import AddTextItemCommand, ResizeBlocksCommand
@@ -49,6 +49,13 @@ class TextController:
         self._suspend_text_command = False
         self._is_updating_from_edit = False
         self._render_macro_stack = None
+        self._copied_text_style: dict | None = None
+        self._text_fill_preview_session = None
+        self._typography_adjustment_stack = None
+        if hasattr(self.main, "text_effects_panel"):
+            self.main.text_effects_panel.effectChanged.connect(
+                self.on_text_effect_changed
+            )
 
     def connect_text_item_signals(self, text_item: TextBlockItem, force_reconnect: bool = False):
         if getattr(text_item, "_ct_signals_connected", False) and not force_reconnect:
@@ -76,10 +83,19 @@ class TextController:
                 text_item.change_undo.disconnect(self.main.rect_item_ctrl.rect_change_undo)
             except (TypeError, RuntimeError):
                 pass
+            if hasattr(text_item, "_ct_delete_requested_slot"):
+                try:
+                    text_item.delete_requested.disconnect(text_item._ct_delete_requested_slot)
+                except (TypeError, RuntimeError):
+                    pass
 
         if not hasattr(text_item, "_ct_text_changed_slot"):
             text_item._ct_text_changed_slot = (
                 lambda text, ti=text_item: self.update_text_block_from_item(ti, text)
+            )
+        if not hasattr(text_item, "_ct_delete_requested_slot"):
+            text_item._ct_delete_requested_slot = (
+                lambda _item, ti=text_item: self._delete_requested_text_item(ti)
             )
 
         text_item.item_selected.connect(self.on_text_item_selected)
@@ -87,15 +103,36 @@ class TextController:
         text_item.text_changed.connect(text_item._ct_text_changed_slot)
         text_item.text_highlighted.connect(self.set_values_from_highlight)
         text_item.change_undo.connect(self.main.rect_item_ctrl.rect_change_undo)
+        text_item.delete_requested.connect(text_item._ct_delete_requested_slot)
         self._last_item_text[text_item] = text_item.toPlainText()
         self._last_item_html[text_item] = text_item.document().toHtml()
         text_item._ct_signals_connected = True
 
+    def _delete_requested_text_item(self, text_item: TextBlockItem) -> None:
+        if text_item not in self.main.image_viewer.get_selected_text_items():
+            self.main.image_viewer.deselect_all()
+            text_item.selected = True
+            text_item.setSelected(True)
+        self.main.delete_selected_box()
+
     def clear_text_edits(self):
+        self.commit_text_fill_preview()
         self.main.curr_tblock = None
         self.main.curr_tblock_item = None
         self.main.s_text_edit.clear()
         self.main.t_text_edit.clear()
+        if hasattr(self.main, "text_effects_button"):
+            self.main.text_effects_button.setEnabled(False)
+        if hasattr(self.main, "set_text_selection_controls_enabled"):
+            self.main.set_text_selection_controls_enabled(False)
+        for menu_name in ("line_spacing_menu", "text_opacity_menu"):
+            menu = getattr(self.main, menu_name, None)
+            if menu is not None:
+                menu.hide()
+        if hasattr(self.main, "text_effects_panel"):
+            self.main.text_effects_panel.clear_selection()
+        if hasattr(self.main, "show_main_right_panel"):
+            self.main.show_main_right_panel()
 
     def on_blk_rendered(self, text: str, font_size: int, blk: TextBlock, image_path: str):
         if not self.main.webtoon_mode:
@@ -150,16 +187,32 @@ class TextController:
             position=(blk.xyxy[0], blk.xyxy[1]),
             rotation=blk.angle,
             vertical=vertical,
+            fill_style=copy.deepcopy(
+                self.main.block_font_color_button.property('fill_style') or {}
+            ),
         )
         
         text_item = self.main.image_viewer.add_text_item(properties)
-        text_item.set_plain_text(text)
+        prev_suspend = self._suspend_text_command
+        self._suspend_text_command = True
+        try:
+            if is_no_space_lang(trg_lng_cd):
+                text_item.set_plain_text(text)
+            else:
+                # Store as a single re-flowable paragraph so the box re-wraps
+                # its content when the user changes its width.
+                text_item.set_rendered_text(text)
+        finally:
+            self._suspend_text_command = prev_suspend
+            self._last_item_text[text_item] = text_item.toPlainText()
+            self._last_item_html[text_item] = text_item.document().toHtml()
 
         command = AddTextItemCommand(self.main, text_item)
         self.main.push_command(command)
 
     def on_text_item_selected(self, text_item: TextBlockItem):
         self._commit_pending_text_command()
+        self.commit_text_fill_preview()
         self.main.curr_tblock_item = text_item
         self._last_item_text[text_item] = text_item.toPlainText()
         self._last_item_html[text_item] = text_item.document().toHtml()
@@ -187,6 +240,17 @@ class TextController:
         self.main.t_text_edit.blockSignals(False)
 
         self.set_values_for_blk_item(text_item)
+        if hasattr(self.main, "text_effects_button"):
+            self.main.text_effects_button.setEnabled(True)
+        if hasattr(self.main, "set_text_selection_controls_enabled"):
+            self.main.set_text_selection_controls_enabled(True)
+        if hasattr(self.main, "text_effects_panel"):
+            selected_items = self._selected_text_items()
+            self.main.text_effects_panel.set_selection(
+                text_item.toPlainText(),
+                text_item.get_visual_style(),
+                len(selected_items),
+            )
 
     def on_text_item_deselected(self):
         self._commit_pending_text_command()
@@ -274,6 +338,7 @@ class TextController:
             self.main.t_text_edit.blockSignals(True)
             self.main.t_text_edit.setPlainText(new_text)
             self.main.t_text_edit.blockSignals(False)
+            self._sync_case_button(text_item)
 
         self._schedule_text_change_command(text_item, new_text, blk)
 
@@ -463,9 +528,13 @@ class TextController:
         if text_item:
             self._last_item_text[text_item] = text
             self._last_item_html[text_item] = text_item.document().toHtml()
+            if self.main.curr_tblock_item == text_item:
+                self._sync_case_button(text_item)
 
     # Formatting actions
     def on_font_dropdown_change(self, font_family: str):
+        if hasattr(self.main, "font_family_button") and font_family:
+            self.main.font_family_button.setText(font_family)
         if self._selected_text_items() and font_family:
             font_size = int(self.main.font_size_dropdown.currentText())
             self._apply_format_to_selected(
@@ -473,35 +542,431 @@ class TextController:
                 lambda item: item.set_font(font_family, font_size),
             )
 
+    # Most-used font ordering
+    _FONT_USAGE_GROUP = "text_rendering/font_usage"
+    _MOST_USED_FONT_COUNT = 6
+
+    def _load_font_usage(self) -> dict[str, int]:
+        settings = QtCore.QSettings("ComicLabs", "ComicTranslate")
+        settings.beginGroup(self._FONT_USAGE_GROUP)
+        usage: dict[str, int] = {}
+        for key in settings.childKeys():
+            try:
+                usage[key] = int(settings.value(key, 0))
+            except (TypeError, ValueError):
+                continue
+        settings.endGroup()
+        return usage
+
+    def _save_font_usage(self, usage: dict[str, int]) -> None:
+        settings = QtCore.QSettings("ComicLabs", "ComicTranslate")
+        settings.beginGroup(self._FONT_USAGE_GROUP)
+        settings.remove("")
+        for family, count in usage.items():
+            # "/" is a group separator for QSettings; skip families that would
+            # be stored as nested keys to keep the counts round-trippable.
+            if "/" in family or "\\" in family:
+                continue
+            settings.setValue(family, int(count))
+        settings.endGroup()
+
+    def record_font_used(self, font_family: str, *, reorder: bool = True) -> None:
+        family = (font_family or "").strip()
+        if not family:
+            return
+        # Only count real families that exist in the dropdown, ignoring the
+        # partial text produced while typing in the editable combo box.
+        if self.main.font_dropdown.findText(family) < 0:
+            return
+        usage = self._load_font_usage()
+        usage[family] = usage.get(family, 0) + 1
+        self._save_font_usage(usage)
+        if reorder:
+            self.apply_most_used_font_order()
+
+    def apply_most_used_font_order(self) -> None:
+        usage = self._load_font_usage()
+        if not usage:
+            return
+        ranked = sorted(usage.items(), key=lambda kv: (-kv[1], kv[0]))
+        top = [family for family, count in ranked[: self._MOST_USED_FONT_COUNT] if count > 0]
+        if top:
+            self.main.font_dropdown.set_priority_families(top)
+
     def on_font_size_change(self, font_size: str):
         if self._selected_text_items() and font_size:
-            font_size = float(font_size)
+            try:
+                font_size = float(font_size)
+            except (TypeError, ValueError):
+                return
+            if not 1.0 <= font_size <= 999.0:
+                return
             self._apply_format_to_selected(
                 "change_text_font_size",
                 lambda item: item.set_font_size(font_size),
             )
 
-    def on_line_spacing_change(self, line_spacing: str):
-        if self.main.curr_tblock_item and line_spacing:
-            old_item = copy.copy(self.main.curr_tblock_item)
-            spacing = float(line_spacing)
-            self.main.curr_tblock_item.set_line_spacing(spacing)
+    def on_font_weight_change(self, weight) -> None:
+        try:
+            weight = int(weight)
+        except (TypeError, ValueError):
+            return
+        if not self._selected_text_items():
+            return
+        self._apply_format_to_selected(
+            "change_text_font_weight",
+            lambda item: item.set_font_weight(weight),
+        )
+        self.main.bold_button.setChecked(weight >= 600)
+        self.main.set_font_weight_menu_value(weight)
 
-            command = TextFormatCommand(self.main.image_viewer, old_item, self.main.curr_tblock_item)
-            self.main.push_command(command)
+    def on_line_spacing_change(self, line_spacing: str):
+        if self._selected_text_items() and line_spacing:
+            try:
+                spacing = float(line_spacing)
+            except (TypeError, ValueError):
+                return
+            self.main.set_line_spacing_menu_value(line_spacing)
+            self._apply_format_to_selected(
+                "change_text_line_spacing",
+                lambda item: item.set_line_spacing(spacing),
+            )
+
+    def on_letter_spacing_change(self, letter_spacing) -> None:
+        if not self._selected_text_items():
+            return
+        try:
+            spacing = float(letter_spacing)
+        except (TypeError, ValueError):
+            return
+        self._apply_format_to_selected(
+            "change_text_letter_spacing",
+            lambda item: item.set_letter_spacing(spacing),
+        )
+
+    def begin_typography_adjustment(self, kind: str) -> None:
+        if self._typography_adjustment_stack is not None:
+            return
+        stack = self.main.undo_group.activeStack()
+        if stack is None or not self._selected_text_items():
+            return
+        stack.beginMacro(f"adjust_text_{kind}")
+        self._typography_adjustment_stack = stack
+
+    def end_typography_adjustment(self) -> None:
+        stack = self._typography_adjustment_stack
+        self._typography_adjustment_stack = None
+        if stack is not None:
+            stack.endMacro()
+
+    def on_text_opacity_change(self) -> None:
+        if not self._selected_text_items():
+            return
+        opacity = self.main.text_opacity_slider.value()
+        self._apply_format_to_selected(
+            "change_text_opacity",
+            lambda item: item.set_text_opacity(opacity),
+        )
+
+    def copy_text_style(self) -> None:
+        items = self._selected_text_items()
+        if not items:
+            return
+        item = items[-1]
+        self._copied_text_style = {
+            "font_family": item.font_family,
+            "font_size": float(item.font_size),
+            "font_weight": int(getattr(item, "font_weight", 700 if item.bold else 400)),
+            "italic": bool(item.italic),
+            "underline": bool(item.underline),
+            "alignment": item.alignment,
+            "line_spacing": float(item.line_spacing),
+            "letter_spacing": float(getattr(item, "letter_spacing", 0.0)),
+            "outline": bool(item.outline),
+            "outline_color": QColor(item.outline_color) if item.outline_color else None,
+            "outline_width": float(item.outline_width),
+            "opacity": round(item.opacity() * 100),
+            "visual_style": item.get_visual_style(),
+        }
+        self.main.apply_style_action.setEnabled(True)
+        self.main.style_copy_button.setToolTip(
+            QtCore.QCoreApplication.translate(
+                "WorkspaceMixin",
+                "Style copied. Click another text box to apply it.",
+            )
+        )
+
+    def begin_style_paint(self, checked: bool = True) -> None:
+        """Copy the selected appearance and arm a one-click paint operation."""
+        viewer = self.main.image_viewer
+        if not checked:
+            viewer.cancel_style_paint()
+            return
+        if not self._selected_text_items():
+            with QtCore.QSignalBlocker(self.main.style_copy_button):
+                self.main.style_copy_button.setChecked(False)
+            return
+
+        self.copy_text_style()
+        pixmap = self.main.style_copy_button.icon().pixmap(28, 28)
+        cursor = (
+            QCursor(pixmap, 3, max(0, pixmap.height() - 3))
+            if not pixmap.isNull()
+            else QCursor(QtCore.Qt.CursorShape.DragCopyCursor)
+        )
+        viewer.start_style_paint(cursor)
+        self.main.style_copy_button.setToolTip(
+            QtCore.QCoreApplication.translate(
+                "WorkspaceMixin",
+                "Style painter active. Click a target text box; right-click to cancel.",
+            )
+        )
+
+    def apply_style_paint_target(self, target: TextBlockItem) -> None:
+        if not self._copied_text_style or target not in self.main.image_viewer.text_items:
+            self.main.image_viewer.cancel_style_paint()
+            return
+
+        viewer = self.main.image_viewer
+        viewer.deselect_all()
+        target.selected = True
+        target.setSelected(True)
+        target.item_selected.emit(target)
+        self.apply_copied_text_style()
+        viewer.cancel_style_paint()
+
+    def on_style_paint_cancelled(self) -> None:
+        with QtCore.QSignalBlocker(self.main.style_copy_button):
+            self.main.style_copy_button.setChecked(False)
+        self.main.style_copy_button.setToolTip(
+            QtCore.QCoreApplication.translate(
+                "WorkspaceMixin",
+                "Paint the selected text style onto another text box",
+            )
+        )
+
+    def apply_copied_text_style(self) -> None:
+        style = copy.deepcopy(self._copied_text_style)
+        if not style or not self._selected_text_items():
+            return
+
+        def apply_style(item: TextBlockItem) -> None:
+            item.set_font(style["font_family"], style["font_size"])
+            item.set_font_weight(style["font_weight"])
+            item.set_italic(style["italic"])
+            item.set_underline(style["underline"])
+            item.set_alignment(style["alignment"])
+            item.set_line_spacing(style["line_spacing"])
+            item.set_letter_spacing(style["letter_spacing"])
+            item.set_visual_style(style["visual_style"])
+            if style["outline"] and style["outline_color"] is not None:
+                item.set_outline(style["outline_color"], style["outline_width"])
+            else:
+                item.set_outline(None, None)
+            item.set_text_opacity(style["opacity"])
+
+        self._apply_format_to_selected("apply_copied_text_style", apply_style)
+
+    def add_quick_text_box(self):
+        """Add an immediately editable text item at the center of the view."""
+        viewer = self.main.image_viewer
+        if not viewer.hasPhoto():
+            return
+
+        settings = QtCore.QSettings("ComicLabs", "ComicTranslate")
+        settings.beginGroup("text_rendering")
+        default_font_family = str(settings.value("font_family", "") or "")
+        default_color = QColor(settings.value("color", "#000000"))
+        if not default_color.isValid():
+            default_color = QColor("#000000")
+        default_alignment_id = settings.value("alignment_id", 1, type=int)
+        default_line_spacing = settings.value("line_spacing", "1.0")
+        settings.endGroup()
+
+        try:
+            default_line_spacing = float(default_line_spacing)
+        except (TypeError, ValueError):
+            default_line_spacing = 1.0
+        default_alignment = self.main.button_to_alignment.get(
+            int(default_alignment_id),
+            QtCore.Qt.AlignmentFlag.AlignCenter,
+        )
+        direction = get_layout_direction(
+            self.main.lang_mapping.get(self.main.t_combo.currentText(), None)
+        )
+        font_size = 12.0
+        text_width = 180.0
+        center = viewer.constrain_point(
+            viewer.mapToScene(viewer.viewport().rect().center())
+        )
+        clean_fill_style = {
+            "mode": "solid",
+            "color": default_color.name(QColor.NameFormat.HexArgb),
+        }
+        properties = TextItemProperties(
+            text="Escribe algo",
+            font_family=default_font_family,
+            font_size=font_size,
+            text_color=QColor(default_color),
+            alignment=default_alignment,
+            line_spacing=default_line_spacing,
+            letter_spacing=0.0,
+            outline_color=None,
+            outline_width=1.0,
+            bold=False,
+            font_weight=400,
+            italic=False,
+            underline=False,
+            opacity=1.0,
+            direction=direction,
+            position=(center.x() - text_width / 2.0, center.y() - font_size),
+            width=text_width,
+            fill_style=clean_fill_style,
+            warp={},
+        )
+        text_item = viewer.add_text_item(properties)
+        self.main.push_command(AddTextItemCommand(self.main, text_item))
+
+        viewer.deselect_all()
+        text_item.selected = True
+        text_item.setSelected(True)
+        text_item.item_selected.emit(text_item)
+        text_item.enter_editing_mode()
+        cursor = text_item.textCursor()
+        cursor.select(QTextCursor.SelectionType.Document)
+        text_item.setTextCursor(cursor)
 
     def on_font_color_change(self):
-        font_color = self.main.get_color()
-        if font_color and font_color.isValid():
-            self.main.block_font_color_button.setStyleSheet(
-                f"background-color: {font_color.name()}; border: none; border-radius: 5px;"
+        selected_items = self._selected_text_items()
+        current_style = (
+            selected_items[0].get_visual_style()
+            if selected_items and hasattr(selected_items[0], 'get_visual_style')
+            else self.main.block_font_color_button.property('fill_style')
+        )
+        fill_style = self.main.get_text_fill_style(current_style)
+        if not fill_style:
+            return
+
+        self.apply_text_fill_style(fill_style)
+
+    def apply_text_fill_style(self, fill_style: dict) -> None:
+        selected_items = self._selected_text_items()
+        if not fill_style:
+            return
+        self._set_fill_button_preview(fill_style)
+        if selected_items:
+            self._apply_format_to_selected(
+                "change_text_fill",
+                lambda item: item.set_visual_style(fill_style),
             )
-            self.main.block_font_color_button.setProperty('selected_color', font_color.name())
-            if self._selected_text_items():
-                self._apply_format_to_selected(
-                    "change_text_color",
-                    lambda item: item.set_color(font_color),
-                )
+
+    def preview_text_fill_style(self, fill_style: dict) -> None:
+        """Render inspector changes immediately without flooding the undo stack."""
+        items = self._selected_text_items()
+        if not fill_style or not items:
+            return
+        active_items = tuple(item for item, _old in self._text_fill_preview_session or ())
+        if active_items and active_items != tuple(items):
+            self.commit_text_fill_preview()
+        if self._text_fill_preview_session is None:
+            self._text_fill_preview_session = [
+                (item, copy.copy(item))
+                for item in items
+            ]
+        self._set_fill_button_preview(fill_style)
+        for item in items:
+            item.set_visual_style(fill_style)
+
+    def commit_text_fill_preview(self, fill_style: dict | None = None) -> None:
+        """Commit one undoable command for a completed live-preview gesture."""
+        session = self._text_fill_preview_session
+        if session is None:
+            if fill_style:
+                self.apply_text_fill_style(fill_style)
+            return
+
+        if fill_style:
+            self._set_fill_button_preview(fill_style)
+            for item, _old_item in session:
+                if item in self.main.image_viewer.text_items:
+                    item.set_visual_style(fill_style)
+
+        self._text_fill_preview_session = None
+        commands = []
+        for item, old_item in session:
+            if item not in self.main.image_viewer.text_items:
+                continue
+            if old_item.get_visual_style() == item.get_visual_style():
+                continue
+            commands.append(
+                TextFormatCommand(self.main.image_viewer, old_item, item)
+            )
+        stack = self.main.undo_group.activeStack()
+        if stack is None or not commands:
+            return
+        if len(commands) > 1:
+            stack.beginMacro("change_text_fill")
+        try:
+            for command in commands:
+                stack.push(command)
+        finally:
+            if len(commands) > 1:
+                stack.endMacro()
+
+    def on_text_effect_changed(
+        self,
+        effect_key: str,
+        effect_value: dict,
+        macro_name: str,
+    ) -> None:
+        """Apply one effect while preserving each selected text's own fill."""
+        valid_keys = {
+            "glow",
+            "drop_shadow",
+            "inner_glow",
+            "inner_shadow",
+            "stroke",
+            "warp",
+            "three_d",
+        }
+        if effect_key != "__reset__" and effect_key not in valid_keys:
+            return
+
+        def apply_effect(item: TextBlockItem) -> None:
+            style = item.get_visual_style()
+            if effect_key == "__reset__":
+                for key in valid_keys:
+                    current = style.get(key, {})
+                    if isinstance(current, dict):
+                        current = copy.deepcopy(current)
+                        current["enabled"] = False
+                        style[key] = current
+            else:
+                style[effect_key] = copy.deepcopy(effect_value)
+            item.set_visual_style(style)
+
+        self._apply_format_to_selected(macro_name, apply_effect)
+
+    def _set_fill_button_preview(self, fill_style: dict) -> None:
+        """Persist the default style and show a useful swatch in the toolbar."""
+        style = copy.deepcopy(fill_style)
+        colour = QColor(style.get('color', '#000000'))
+        if style.get('mode') == 'gradient':
+            stops = style.get('gradient', {}).get('stops', [])
+            if stops:
+                colour = QColor(stops[0].get('color', '#000000'))
+        if not colour.isValid():
+            colour = QColor('#000000')
+        self.main.block_font_color_button.setStyleSheet(
+            f"background-color: {colour.name()}; border: none; border-radius: 5px;"
+        )
+        self.main.block_font_color_button.setProperty('selected_color', colour.name())
+        self.main.block_font_color_button.setProperty('fill_style', style)
+        if (
+            hasattr(self.main, "set_fill_inspector_style")
+            and not getattr(self.main, "_fill_inspector_applying", False)
+        ):
+            self.main.set_fill_inspector_style(style)
 
     def left_align(self):
         if self.main.curr_tblock_item:
@@ -523,6 +988,14 @@ class TextController:
         if self.main.curr_tblock_item:
             old_item = copy.copy(self.main.curr_tblock_item)
             self.main.curr_tblock_item.set_alignment(QtCore.Qt.AlignmentFlag.AlignRight)
+
+            command = TextFormatCommand(self.main.image_viewer, old_item, self.main.curr_tblock_item)
+            self.main.push_command(command)
+
+    def justify_align(self):
+        if self.main.curr_tblock_item:
+            old_item = copy.copy(self.main.curr_tblock_item)
+            self.main.curr_tblock_item.set_alignment(QtCore.Qt.AlignmentFlag.AlignJustify)
 
             command = TextFormatCommand(self.main.image_viewer, old_item, self.main.curr_tblock_item)
             self.main.push_command(command)
@@ -554,6 +1027,136 @@ class TextController:
             command = TextFormatCommand(self.main.image_viewer, old_item, self.main.curr_tblock_item)
             self.main.push_command(command)
 
+    def to_uppercase(self, checked=True):
+        """Toggle selected text between uppercase and lowercase.
+
+        When editing a box with an active selection, only the selected text is
+        transformed; otherwise the whole selected text box is transformed.
+        """
+        items = self._selected_text_items()
+        if not items:
+            return
+        make_uppercase = bool(checked)
+
+        # Flush any pending typing edit so its command stays separate from this one.
+        self._commit_pending_text_command()
+
+        changes = []
+        self._suspend_text_command = True
+        try:
+            for item in items:
+                if item not in self.main.image_viewer._scene.items():
+                    continue
+                old_text = item.toPlainText()
+                old_html = item.document().toHtml()
+                if not self._change_case_text_item(item, make_uppercase):
+                    continue
+                new_text = item.toPlainText()
+                new_html = item.document().toHtml()
+                blk = self._find_text_block_for_item(item)
+                changes.append((item, old_text, new_text, old_html, new_html, blk))
+                self._last_item_text[item] = new_text
+                self._last_item_html[item] = new_html
+        finally:
+            self._suspend_text_command = False
+
+        if not changes:
+            self._sync_case_button()
+            return
+
+        stack = self.main.undo_group.activeStack()
+        if stack is not None:
+            if len(changes) > 1:
+                stack.beginMacro(
+                    "uppercase_text" if make_uppercase else "lowercase_text"
+                )
+            try:
+                for item, old_text, new_text, old_html, new_html, blk in changes:
+                    stack.push(
+                        TextEditCommand(self.main, item, old_text, new_text, old_html, new_html, blk)
+                    )
+            finally:
+                if len(changes) > 1:
+                    stack.endMacro()
+        else:
+            for item, old_text, new_text, old_html, new_html, blk in changes:
+                if blk:
+                    blk.translation = new_text
+                if self.main.curr_tblock_item == item:
+                    self.main.t_text_edit.blockSignals(True)
+                    self.main.t_text_edit.setPlainText(new_text)
+                    self.main.t_text_edit.blockSignals(False)
+            self.main.mark_project_dirty()
+        self._sync_case_button()
+
+    def _uppercase_text_item(self, text_item: TextBlockItem) -> bool:
+        return self._change_case_text_item(text_item, True)
+
+    def _change_case_text_item(
+        self,
+        text_item: TextBlockItem,
+        make_uppercase: bool,
+    ) -> bool:
+        doc = text_item.document()
+        cursor = text_item.textCursor()
+        if getattr(text_item, "editing_mode", False) and cursor.hasSelection():
+            start, end = cursor.selectionStart(), cursor.selectionEnd()
+        else:
+            whole = QTextCursor(doc)
+            whole.select(QTextCursor.SelectionType.Document)
+            start, end = whole.selectionStart(), whole.selectionEnd()
+        return self._change_case_range(doc, start, end, make_uppercase)
+
+    @staticmethod
+    def _uppercase_range(doc, start: int, end: int) -> bool:
+        return TextController._change_case_range(doc, start, end, True)
+
+    @staticmethod
+    def _change_case_range(
+        doc,
+        start: int,
+        end: int,
+        make_uppercase: bool,
+    ) -> bool:
+        if end <= start:
+            return False
+        cursor = QTextCursor(doc)
+        cursor.beginEditBlock()
+        changed = False
+        # Walk backwards so any length change (e.g. ß -> SS) never shifts the
+        # positions still to visit, and keep each character's own formatting.
+        pos = end - 1
+        while pos >= start:
+            cursor.setPosition(pos)
+            cursor.setPosition(pos + 1, QTextCursor.KeepAnchor)
+            char = cursor.selectedText()
+            transformed = char.upper() if make_uppercase else char.lower()
+            if transformed != char:
+                cursor.insertText(transformed, cursor.charFormat())
+                changed = True
+            pos -= 1
+        cursor.endEditBlock()
+        return changed
+
+    def _sync_case_button(self, text_item: TextBlockItem | None = None) -> None:
+        if not hasattr(self.main, "uppercase_button"):
+            return
+        items = [text_item] if text_item is not None else self._selected_text_items()
+        states = []
+        for item in items:
+            if item is None:
+                continue
+            cursor = item.textCursor()
+            if getattr(item, "editing_mode", False) and cursor.hasSelection():
+                text = cursor.selectedText()
+            else:
+                text = item.toPlainText()
+            has_cased_text = any(char.lower() != char.upper() for char in text)
+            states.append(has_cased_text and text == text.upper())
+        blocker = QtCore.QSignalBlocker(self.main.uppercase_button)
+        self.main.uppercase_button.setChecked(bool(states) and all(states))
+        del blocker
+
     def on_outline_color_change(self):
         outline_color = self.main.get_color()
         if outline_color and outline_color.isValid():
@@ -561,7 +1164,9 @@ class TextController:
                 f"background-color: {outline_color.name()}; border: none; border-radius: 5px;"
             )
             self.main.outline_font_color_button.setProperty('selected_color', outline_color.name())
+            self.main.refresh_outline_toolbar_button()
             outline_width = float(self.main.outline_width_dropdown.currentText())
+            self.main.set_outline_inspector_values(outline_color, outline_width)
 
             if self.main.curr_tblock_item and self.main.outline_checkbox.isChecked():
                 old_item = copy.copy(self.main.curr_tblock_item)
@@ -571,6 +1176,10 @@ class TextController:
                 self.main.push_command(command)
 
     def on_outline_width_change(self, outline_width):
+        self.main.set_outline_inspector_values(
+            self.main.outline_font_color_button.property('selected_color'),
+            outline_width,
+        )
         if self.main.curr_tblock_item and self.main.outline_checkbox.isChecked():
             old_item = copy.copy(self.main.curr_tblock_item)
             outline_width = float(self.main.outline_width_dropdown.currentText())
@@ -581,20 +1190,43 @@ class TextController:
             command = TextFormatCommand(self.main.image_viewer, old_item, self.main.curr_tblock_item)
             self.main.push_command(command)
 
-    def toggle_outline_settings(self, state):
-        enabled = True if state == 2 else False
-        if self.main.curr_tblock_item:
-            if not enabled:
-                self.main.curr_tblock_item.set_outline(None, None)
-            else:
-                old_item = copy.copy(self.main.curr_tblock_item)
-                outline_width = float(self.main.outline_width_dropdown.currentText())
-                color_str = self.main.outline_font_color_button.property('selected_color')
-                color = QColor(color_str)
-                self.main.curr_tblock_item.set_outline(color, outline_width)
+    def apply_outline_style(self, colour: QColor, outline_width: float) -> None:
+        colour = QColor(colour)
+        if not colour.isValid() or not self._selected_text_items():
+            return
+        try:
+            outline_width = max(0.5, min(10.0, float(outline_width)))
+        except (TypeError, ValueError):
+            outline_width = 1.0
+        self._apply_format_to_selected(
+            "change_text_outline_style",
+            lambda item: item.set_outline(colour, outline_width),
+        )
 
-                command = TextFormatCommand(self.main.image_viewer, old_item, self.main.curr_tblock_item)
-                self.main.push_command(command)
+    def toggle_outline_settings(self, state):
+        try:
+            enabled = int(state) == int(QtCore.Qt.CheckState.Checked.value)
+        except (TypeError, ValueError):
+            enabled = bool(state)
+        self.main._sync_outline_toolbar_button(enabled)
+        if not self._selected_text_items():
+            return
+        try:
+            outline_width = float(self.main.outline_width_dropdown.currentText())
+        except (TypeError, ValueError):
+            outline_width = 1.0
+        color = QColor(
+            self.main.outline_font_color_button.property('selected_color')
+            or "#000000"
+        )
+        if not color.isValid():
+            color = QColor("#000000")
+        self._apply_format_to_selected(
+            "change_text_outline",
+            lambda item: item.set_outline(color, outline_width)
+            if enabled
+            else item.set_outline(None, None),
+        )
 
     # Widget helpers
     def block_text_item_widgets(self, widgets):
@@ -610,6 +1242,7 @@ class TextController:
         self.main.alignment_tool_group.get_button_group().buttons()[0].clicked.disconnect(self.left_align)
         self.main.alignment_tool_group.get_button_group().buttons()[1].clicked.disconnect(self.center_align)
         self.main.alignment_tool_group.get_button_group().buttons()[2].clicked.disconnect(self.right_align)
+        self.main.alignment_tool_group.get_button_group().buttons()[3].clicked.disconnect(self.justify_align)
 
     def unblock_text_item_widgets(self, widgets):
         # Unblock signals
@@ -623,6 +1256,7 @@ class TextController:
         self.main.alignment_tool_group.get_button_group().buttons()[0].clicked.connect(self.left_align)
         self.main.alignment_tool_group.get_button_group().buttons()[1].clicked.connect(self.center_align)
         self.main.alignment_tool_group.get_button_group().buttons()[2].clicked.connect(self.right_align)
+        self.main.alignment_tool_group.get_button_group().buttons()[3].clicked.connect(self.justify_align)
 
     def set_values_for_blk_item(self, text_item: TextBlockItem):
 
@@ -634,11 +1268,32 @@ class TextController:
             self.main.font_size_dropdown.setCurrentText(str(int(text_item.font_size)))
 
             self.main.line_spacing_dropdown.setCurrentText(str(text_item.line_spacing))
+            self.main.set_line_spacing_menu_value(text_item.line_spacing)
+            self.main.set_letter_spacing_control_value(
+                getattr(text_item, "letter_spacing", 0.0)
+            )
+            self.main.set_font_weight_menu_value(
+                getattr(text_item, "font_weight", 700 if text_item.bold else 400)
+            )
+            opacity_percent = round(text_item.opacity() * 100)
+            self.main.text_opacity_slider.setValue(opacity_percent)
+            self.main.set_text_opacity_preview(opacity_percent)
 
             self.main.block_font_color_button.setStyleSheet(
                 f"background-color: {text_item.text_color.name()}; border: none; border-radius: 5px;"
             )
             self.main.block_font_color_button.setProperty('selected_color', text_item.text_color.name())
+            self.main.block_font_color_button.setProperty(
+                'fill_style',
+                text_item.get_visual_style() if hasattr(text_item, 'get_visual_style') else {},
+            )
+            if hasattr(self.main, "text_effects_panel"):
+                self.main.text_effects_panel.set_style(text_item.get_visual_style())
+            if (
+                hasattr(self.main, "set_fill_inspector_style")
+                and not getattr(self.main, "_fill_inspector_applying", False)
+            ):
+                self.main.set_fill_inspector_style(text_item.get_visual_style())
 
             if text_item.outline_color is not None:
                 self.main.outline_font_color_button.setStyleSheet(
@@ -646,22 +1301,38 @@ class TextController:
                 )
                 self.main.outline_font_color_button.setProperty('selected_color', text_item.outline_color.name())
             else:
-                self.main.outline_font_color_button.setStyleSheet(
-                    "background-color: white; border: none; border-radius: 5px;"
+                fallback_outline = QColor(
+                    self.main.outline_font_color_button.property("selected_color")
+                    or "#000000"
                 )
-                self.main.outline_font_color_button.setProperty('selected_color', '#ffffff')
+                if not fallback_outline.isValid():
+                    fallback_outline = QColor("#000000")
+                self.main.outline_font_color_button.setStyleSheet(
+                    f"background-color: {fallback_outline.name()}; border: none; border-radius: 5px;"
+                )
+                self.main.outline_font_color_button.setProperty(
+                    'selected_color', fallback_outline.name()
+                )
 
             self.main.outline_width_dropdown.setCurrentText(str(text_item.outline_width))
             self.main.outline_checkbox.setChecked(text_item.outline)
+            self.main._sync_outline_toolbar_button(text_item.outline)
+            self.main.refresh_outline_toolbar_button()
+            self.main.set_outline_inspector_values(
+                self.main.outline_font_color_button.property('selected_color'),
+                text_item.outline_width,
+            )
 
             self.main.bold_button.setChecked(text_item.bold)
             self.main.italic_button.setChecked(text_item.italic)
             self.main.underline_button.setChecked(text_item.underline)
+            self._sync_case_button(text_item)
 
             alignment_to_button = {
                 QtCore.Qt.AlignmentFlag.AlignLeft: 0,
                 QtCore.Qt.AlignmentFlag.AlignCenter: 1,
                 QtCore.Qt.AlignmentFlag.AlignRight: 2,
+                QtCore.Qt.AlignmentFlag.AlignJustify: 3,
             }
 
             alignment = text_item.alignment
@@ -669,7 +1340,7 @@ class TextController:
 
             if alignment in alignment_to_button:
                 button_index = alignment_to_button[alignment]
-                button_group.buttons()[button_index].setChecked(True)
+                self.main.set_alignment_menu_value(button_index)
 
         finally:
             self.unblock_text_item_widgets(self.widgets_to_block)
@@ -681,7 +1352,11 @@ class TextController:
         # Attributes
         font_family = item_highlighted['font_family']
         font_size = item_highlighted['font_size']
-        text_color =  item_highlighted['text_color']
+        font_weight = item_highlighted.get('font_weight')
+        letter_spacing = item_highlighted.get('letter_spacing')
+        line_spacing = item_highlighted.get('line_spacing')
+        text_color = item_highlighted['text_color']
+        opacity = item_highlighted.get('opacity')
 
         outline_color = item_highlighted['outline_color']
         outline_width =  item_highlighted['outline_width']
@@ -697,6 +1372,15 @@ class TextController:
             # Set values
             self.main.set_font(font_family) if font_family else None
             self.main.font_size_dropdown.setCurrentText(str(int(font_size))) if font_size else None
+            if font_weight:
+                self.main.set_font_weight_menu_value(font_weight)
+            if letter_spacing is not None:
+                self.main.set_letter_spacing_control_value(letter_spacing)
+            if line_spacing is not None:
+                self.main.set_line_spacing_menu_value(line_spacing)
+            if opacity is not None:
+                self.main.text_opacity_slider.setValue(int(opacity))
+                self.main.set_text_opacity_preview(int(opacity))
 
             if text_color is not None:
                 self.main.block_font_color_button.setStyleSheet(
@@ -710,29 +1394,49 @@ class TextController:
                 )
                 self.main.outline_font_color_button.setProperty('selected_color', outline_color)
             else:
-                self.main.outline_font_color_button.setStyleSheet(
-                    "background-color: white; border: none; border-radius: 5px;"
+                fallback_outline = QColor(
+                    self.main.outline_font_color_button.property("selected_color")
+                    or "#000000"
                 )
-                self.main.outline_font_color_button.setProperty('selected_color', '#ffffff')
+                if not fallback_outline.isValid():
+                    fallback_outline = QColor("#000000")
+                self.main.outline_font_color_button.setStyleSheet(
+                    f"background-color: {fallback_outline.name()}; border: none; border-radius: 5px;"
+                )
+                self.main.outline_font_color_button.setProperty(
+                    'selected_color', fallback_outline.name()
+                )
 
             self.main.outline_width_dropdown.setCurrentText(str(outline_width)) if outline_width else None
             self.main.outline_checkbox.setChecked(outline)
+            self.main._sync_outline_toolbar_button(outline)
+            self.main.refresh_outline_toolbar_button()
+            self.main.set_outline_inspector_values(
+                self.main.outline_font_color_button.property('selected_color'),
+                outline_width or 1.0,
+            )
 
             self.main.bold_button.setChecked(bold)
+            if not font_weight and hasattr(
+                self.main, "set_font_weight_button_active"
+            ):
+                self.main.set_font_weight_button_active(bool(bold))
             self.main.italic_button.setChecked(italic)
             self.main.underline_button.setChecked(underline)
+            self._sync_case_button(self.main.curr_tblock_item)
 
             alignment_to_button = {
                 QtCore.Qt.AlignmentFlag.AlignLeft: 0,
                 QtCore.Qt.AlignmentFlag.AlignCenter: 1,
                 QtCore.Qt.AlignmentFlag.AlignRight: 2,
+                QtCore.Qt.AlignmentFlag.AlignJustify: 3,
             }
 
             button_group = self.main.alignment_tool_group.get_button_group()
 
             if alignment in alignment_to_button:
                 button_index = alignment_to_button[alignment]
-                button_group.buttons()[button_index].setChecked(True)
+                self.main.set_alignment_menu_value(button_index)
 
         finally:
             self.unblock_text_item_widgets(self.widgets_to_block)
@@ -852,9 +1556,21 @@ class TextController:
                         if is_no_space_lang(trg_lng_cd):
                             wrapped = wrapped.replace(" ", "")
 
+                        # Store re-flowable content (single paragraph + pinned
+                        # width) so the box re-wraps when its width changes.
+                        reflow_text = wrapped
+                        fixed_wrap = None
+                        if not vertical and not is_no_space_lang(trg_lng_cd):
+                            unwrapped = " ".join(
+                                part for part in wrapped.split("\n") if part != ""
+                            )
+                            if unwrapped and unwrapped != wrapped:
+                                reflow_text = unwrapped
+                                fixed_wrap = rendered_width
+
                         font_color = get_smart_text_color(blk.font_color, setting_font_color)
                         text_props = TextItemProperties(
-                            text=wrapped,
+                            text=reflow_text,
                             font_family=font_family,
                             font_size=font_size,
                             text_color=font_color,
@@ -873,6 +1589,10 @@ class TextController:
                             width=rendered_width,
                             height=rendered_height,
                             vertical=vertical,
+                            fixed_wrap_width=fixed_wrap,
+                            fill_style=copy.deepcopy(
+                                self.main.block_font_color_button.property('fill_style') or {}
+                            ),
                         )
                         new_text_items_state.append(text_props.to_dict())
 

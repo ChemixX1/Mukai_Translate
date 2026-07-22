@@ -100,7 +100,9 @@ def _process_stats_vectorized(
     stats: np.ndarray, 
     image_shape: tuple[int, int], 
     min_area: int, 
-    margin: int = 0
+    margin: int = 0,
+    small_component_min_area: int = 4,
+    small_component_max_span: int = 6,
 ) -> np.ndarray:
     """
     Helper to filter stats using NumPy vectorization, with a border margin.
@@ -122,22 +124,27 @@ def _process_stats_vectorized(
 
     # 1. Create a boolean mask for all conditions
     
-    # Condition 1: Area is greater than min_area
-    area_mask = stats_no_bg[:, imk.CC_STAT_AREA] > min_area
-
-    # Condition 2: Bounding box is NOT within the margin of the border.
+    # Condition 1: Area is greater than min_area, while keeping punctuation.
     x1 = stats_no_bg[:, imk.CC_STAT_LEFT]
     y1 = stats_no_bg[:, imk.CC_STAT_TOP]
     w = stats_no_bg[:, imk.CC_STAT_WIDTH]
     h = stats_no_bg[:, imk.CC_STAT_HEIGHT]
+    area = stats_no_bg[:, imk.CC_STAT_AREA]
+    area_mask = area > min_area
+    small_component_mask = (
+        (area >= small_component_min_area)
+        & (w <= small_component_max_span)
+        & (h <= small_component_max_span)
+    )
 
+    # Condition 2: Bounding box is NOT within the margin of the border.
     border_mask = (x1 >= margin) & \
                   (y1 >= margin) & \
                   ((x1 + w) <= width - margin) & \
                   ((y1 + h) <= height - margin)
     
     # Combine all masks
-    final_mask = area_mask & border_mask
+    final_mask = (area_mask | small_component_mask) & border_mask
     
     # Apply the mask to get only the valid components
     valid_stats = stats_no_bg[final_mask]
@@ -180,6 +187,10 @@ def detect_content_in_bbox(
     
     binary_black_text = (gray < threshold).astype(np.uint8)
     binary_white_text = (gray > threshold).astype(np.uint8)
+    if not np.any(binary_black_text):
+        binary_black_text = (gray == gray.min()).astype(np.uint8)
+    if not np.any(binary_white_text):
+        binary_white_text = (gray == gray.max()).astype(np.uint8)
     
     # Convert boolean to uint8 for connectedComponentsWithStats
     _, _, stats_white, _ = imk.connected_components_with_stats(binary_white_text, connectivity=8)
@@ -198,3 +209,76 @@ def detect_content_in_bbox(
         return bboxes_white
     else:
         return bboxes_black
+
+
+def detect_content_mask_in_bbox(
+    image: np.ndarray,
+    min_area: int = 10,
+    margin: int = 1,
+) -> np.ndarray:
+    """Detect text-like content as a binary component mask instead of box unions."""
+    if image is None or image.size == 0:
+        return np.zeros((0, 0), dtype=np.uint8)
+
+    gray = imk.to_gray(image)
+    threshold = mahotas.thresholding.otsu(gray)
+
+    binary_black_text = (gray < threshold).astype(np.uint8)
+    binary_white_text = (gray > threshold).astype(np.uint8)
+    if not np.any(binary_black_text):
+        binary_black_text = (gray == gray.min()).astype(np.uint8)
+    if not np.any(binary_white_text):
+        binary_white_text = (gray == gray.max()).astype(np.uint8)
+
+    mask_black = _mask_from_component_stats(binary_black_text, min_area=min_area, margin=margin)
+    mask_white = _mask_from_component_stats(binary_white_text, min_area=min_area, margin=margin)
+    return np.where((mask_black > 0) | (mask_white > 0), 255, 0).astype(np.uint8)
+
+
+def _mask_from_component_stats(
+    binary_mask: np.ndarray,
+    *,
+    min_area: int,
+    margin: int,
+    small_component_min_area: int = 4,
+    small_component_max_span: int = 6,
+) -> np.ndarray:
+    num_labels, labels, stats, _ = imk.connected_components_with_stats(binary_mask, connectivity=8)
+    if num_labels <= 1:
+        return np.zeros(binary_mask.shape[:2], dtype=np.uint8)
+
+    stats_no_bg = stats[1:]
+    if stats_no_bg.shape[0] == 0:
+        return np.zeros(binary_mask.shape[:2], dtype=np.uint8)
+
+    height, width = binary_mask.shape[:2]
+    x1 = stats_no_bg[:, imk.CC_STAT_LEFT]
+    y1 = stats_no_bg[:, imk.CC_STAT_TOP]
+    w = stats_no_bg[:, imk.CC_STAT_WIDTH]
+    h = stats_no_bg[:, imk.CC_STAT_HEIGHT]
+    area = stats_no_bg[:, imk.CC_STAT_AREA]
+
+    area_mask = area > min_area
+    small_component_mask = (
+        (area >= small_component_min_area)
+        & (w <= small_component_max_span)
+        & (h <= small_component_max_span)
+    )
+    border_mask = (
+        (x1 >= margin)
+        & (y1 >= margin)
+        & ((x1 + w) <= width - margin)
+        & ((y1 + h) <= height - margin)
+    )
+    keep = (area_mask | small_component_mask) & border_mask
+
+    # Large connected fills are normally the bubble/background, not glyphs.
+    if height * width > 150:
+        max_area = int(0.50 * height * width)
+        keep = keep & (area < max_area)
+
+    if not np.any(keep):
+        return np.zeros(binary_mask.shape[:2], dtype=np.uint8)
+
+    keep_labels = np.flatnonzero(keep) + 1
+    return np.where(np.isin(labels, keep_labels), 255, 0).astype(np.uint8)

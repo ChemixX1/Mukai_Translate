@@ -143,8 +143,13 @@ class LazyImageLoader:
         try:
             # Load the actual image
             file_path = self.image_file_paths[page_idx]
-            ensure_path_materialized(file_path)
-            img = imk.read_image(file_path)
+            if self.main_controller and hasattr(self.main_controller, "load_image"):
+                # Preserve page-history edits, including image replacements,
+                # when a page is lazily loaded again in webtoon mode.
+                img = self.main_controller.load_image(file_path)
+            else:
+                ensure_path_materialized(file_path)
+                img = imk.read_image(file_path)
             
             if img is not None:
                 

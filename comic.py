@@ -9,6 +9,7 @@ from PySide6.QtCore import QSettings, QTranslator, QLocale, \
 from PySide6.QtCore import QLibraryInfo
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication
+from app.env_config import load_project_env
 from app.ui.splash_screen import SplashScreen
 
 
@@ -92,6 +93,7 @@ class LoadingWorker(QObject):
     """Worker to load the application in a background thread."""
     finished = Signal(object)  # Signals when loading is complete with (project_file)
     failed = Signal()  # Signal when loading fails or is cancelled
+    progress = Signal(str)
     
     def __init__(self, icon, selected_language, sys_argv):
         super().__init__()
@@ -112,7 +114,14 @@ class LoadingWorker(QObject):
             # IMPORTANT: don't create any QWidget/QObject instances here.
             try:
                 import importlib
+                self.progress.emit("Loading application modules...")
                 importlib.import_module("controller")
+                self.progress.emit("Preparing local OCR, detection and inpainting models...")
+                from app.startup_preloader import preload_startup_assets
+                preload_startup_assets(
+                    self.progress.emit,
+                    lambda: self.cancelled or QThread.currentThread().isInterruptionRequested(),
+                )
             except Exception as e:
                 logging.error(f"Error preloading modules: {e}")
                 self.failed.emit()
@@ -139,6 +148,8 @@ def main():
     logging.basicConfig(
         level=logging.INFO,
     )
+
+    load_project_env()
     
     if sys.platform == "win32":
         # Necessary Workaround to set Taskbar Icon on Windows
@@ -172,9 +183,17 @@ def main():
     # Set the application icon
     # icon = QIcon(":/icons/window_icon.png")
     current_file_dir = os.path.dirname(os.path.abspath(__file__))
-    icon_path = os.path.join(current_file_dir, 'resources', 'icons', 'icon.ico')
+    svg_icon_path = os.path.join(current_file_dir, 'resources', 'icons', 'logo_mt.svg')
+    ico_icon_path = os.path.join(current_file_dir, 'resources', 'icons', 'icon.ico')
+    icon_path = svg_icon_path if os.path.exists(svg_icon_path) else ico_icon_path
     icon = QIcon(icon_path)
     app.setWindowIcon(icon)
+
+    from app.license_manager import ensure_application_license
+    if not ensure_application_license():
+        server.close()
+        QLocalServer.removeServer(server_name)
+        return
 
     # Load bundled fonts
     bundled_fonts_dir = os.path.join(current_file_dir, 'resources', 'fonts')
@@ -184,14 +203,7 @@ def main():
                 QFontDatabase.addApplicationFont(os.path.join(bundled_fonts_dir, _fname))
 
     # Show Splash Screen
-    splash_pix = QPixmap(os.path.join(current_file_dir, 'resources', 'icons', 'splash.png'))
-    # High DPI Scaling
-    screen = app.primaryScreen()
-    dpr = screen.devicePixelRatio()
-    target_w, target_h = 400, 225
-    splash_pix = splash_pix.scaled(int(target_w * dpr), int(target_h * dpr), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-    splash_pix.setDevicePixelRatio(dpr)
-    splash = SplashScreen(splash_pix)
+    splash = SplashScreen()
     
     # Get language settings
     settings = QSettings("ComicLabs", "ComicTranslate")
@@ -205,6 +217,7 @@ def main():
     worker.failed.connect(worker.deleteLater)
     worker.finished.connect(thread.quit)
     worker.failed.connect(thread.quit)
+    worker.progress.connect(splash.set_status)
     # thread.finished.connect(thread.deleteLater) # Removed to avoid RuntimeError on exit check
     
     # Connect signals

@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import re
 import jieba
 import janome.tokenizer
@@ -7,6 +8,8 @@ import numpy as np
 from pythainlp.tokenize import word_tokenize
 from .textblock import TextBlock
 import imkit as imk
+
+logger = logging.getLogger(__name__)
 
 
 MODEL_MAP = {
@@ -47,21 +50,42 @@ def get_raw_translation(blk_list: list[TextBlock]):
     
     return raw_translations_json
 
-def set_texts_from_json(blk_list: list[TextBlock], json_string: str):
-    match = re.search(r"\{[\s\S]*\}", json_string)
-    if match:
-        # Extract the JSON string from the matched regular expression
-        json_string = match.group(0)
-        translation_dict = json.loads(json_string)
-        
-        for idx, blk in enumerate(blk_list):
-            block_key = f"block_{idx}"
-            if block_key in translation_dict:
-                blk.translation = translation_dict[block_key]
-            else:
-                print(f"Warning: {block_key} not found in JSON string.")
-    else:
-        print("No JSON found in the input string.")
+def _extract_json_object(json_string: str) -> dict | None:
+    """Extract the first JSON object from a model response."""
+    if not json_string:
+        return None
+
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", json_string):
+        try:
+            obj, _ = decoder.raw_decode(json_string[match.start():])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
+def set_texts_from_json(blk_list: list[TextBlock], json_string: str) -> bool:
+    translation_dict = _extract_json_object(json_string)
+    if translation_dict is None:
+        logger.warning("No JSON object found in translation response.")
+        return False
+
+    missing_keys = []
+    for idx, blk in enumerate(blk_list):
+        block_key = f"block_{idx}"
+        if block_key in translation_dict:
+            value = translation_dict[block_key]
+            blk.translation = "" if value is None else str(value)
+        else:
+            missing_keys.append(block_key)
+
+    if missing_keys:
+        logger.warning("Translation response missing keys: %s", ", ".join(missing_keys))
+        return False
+
+    return True
 
 def set_upper_case(blk_list: list[TextBlock], upper_case: bool):
     for blk in blk_list:
