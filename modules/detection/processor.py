@@ -2,6 +2,7 @@ import numpy as np
 
 from ..utils.textblock import TextBlock
 from .factory import DetectionEngineFactory
+from .utils.stylized_text import detect_coloured_outlined_text
 
 
 class TextBlockDetector:
@@ -18,4 +19,6 @@ class TextBlockDetector:
         engine = DetectionEngineFactory.create_engine(
             self.settings, self.detector
         )
-        return engine.detect(img)
+        blocks = engine.detect(img)
+        blocks.extend(detect_coloured_outlined_text(img, blocks))
+        return blocks

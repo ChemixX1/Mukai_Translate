@@ -21,7 +21,7 @@ class ToolStateMixin:
 
     def toggle_brush_tool(self):
         if self.brush_button.isChecked():
-            self.image_viewer.set_magic_eraser_refinement(False)
+            self.image_viewer.set_magic_eraser_mode(False)
             self.set_tool("brush")
             size = self.image_viewer.brush_size
             self.set_slider_size(size)
@@ -42,6 +42,8 @@ class ToolStateMixin:
         self.brush_eraser_slider.blockSignals(False)
 
     def set_tool(self, tool_name: str):
+        if tool_name != "brush":
+            self.image_viewer.set_magic_eraser_mode(False)
         self.image_viewer.unsetCursor()
         self.image_viewer.set_tool(tool_name)
 
@@ -90,8 +92,9 @@ class ToolStateMixin:
         size = int(self.magic_eraser_size_slider.value())
         self.set_brush_eraser_size(size)
         self.set_slider_size(size)
-        self.image_viewer.set_magic_eraser_refinement(
-            self.magic_eraser_sam_checkbox.isChecked()
+        self.image_viewer.set_magic_eraser_mode(
+            True,
+            refine_with_sam=self.magic_eraser_sam_checkbox.isChecked(),
         )
         self.set_tool("brush")
         self.magic_eraser_menu.hide()

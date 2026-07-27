@@ -79,7 +79,10 @@ class PatchManager:
                     if not any(p['hash'] == prop['hash'] for p in mem_list):
                         # Load image for in-memory storage
                         ensure_path_materialized(patch_data['png_path'])
-                        cv_img = imk.read_image(patch_data['png_path'])
+                        cv_img = imk.read_image(
+                            patch_data['png_path'],
+                            preserve_alpha=True,
+                        )
                         if cv_img is not None:
                             mem_prop = {
                                 'bbox': patch_data['bbox'],

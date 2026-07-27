@@ -250,13 +250,21 @@ class PatchCommandBase:
         x, y, w, h = properties['bbox']
         if 'png_path' in properties:
             ensure_path_materialized(properties['png_path'])
-            img = imk.read_image(properties['png_path'])
+            img = imk.read_image(properties['png_path'], preserve_alpha=True)
         else:
             img = properties['image']
         if img is None:
             return None
-        qimg = QtGui.QImage(img.data, w, h, img.strides[0],
-                            QtGui.QImage.Format.Format_RGB888)
+        img = np.ascontiguousarray(img)
+        if img.ndim != 3 or img.shape[0] != h or img.shape[1] != w:
+            return None
+        if img.shape[2] == 4:
+            image_format = QtGui.QImage.Format.Format_RGBA8888
+        elif img.shape[2] == 3:
+            image_format = QtGui.QImage.Format.Format_RGB888
+        else:
+            return None
+        qimg = QtGui.QImage(img.data, w, h, img.strides[0], image_format)
         pix  = QtGui.QPixmap.fromImage(qimg)
         item = QtWidgets.QGraphicsPixmapItem(pix)
         

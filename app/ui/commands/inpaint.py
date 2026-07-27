@@ -79,7 +79,7 @@ class PatchInsertCommand(QUndoCommand, PatchCommandBase):
 
             # only load into memory if being displayed
             if self.display:
-                img_data = imk.read_image(prop['png_path'])
+                img_data = imk.read_image(prop['png_path'], preserve_alpha=True)
                 mem_list.append({
                     'bbox': prop['bbox'],
                     'image': img_data,

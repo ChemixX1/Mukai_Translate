@@ -49,11 +49,27 @@ class InteractionManager:
         """Checks if a scene position is within the item's rotation ring."""
         if not item: return False
         local = item.mapFromScene(scene_pos)
+        if isinstance(item, TextBlockItem):
+            center = item.rotation_handle_center(self._text_item_view_scale(item))
+            radius = 13.0 / self._text_item_view_scale(item)
+            return math.hypot(local.x() - center.x(), local.y() - center.y()) <= radius
         r = item.boundingRect()
         dx = max(r.left() - local.x(), 0, local.x() - r.right())
         dy = max(r.top() - local.y(), 0, local.y() - r.bottom())
         dist = math.hypot(dx, dy)
         return self.rotate_margin_min < dist < self.rotate_margin_max
+
+    def _text_item_view_scale(self, item: TextBlockItem) -> float:
+        scene = item.scene()
+        views = scene.views() if scene is not None else []
+        if not views:
+            return 1.0
+        transform = item.deviceTransform(views[0].viewportTransform())
+        return max(
+            0.001,
+            math.hypot(transform.m11(), transform.m12()),
+            math.hypot(transform.m21(), transform.m22()),
+        )
 
     def _in_resize_area(self, item: Optional[MoveableRectItem|TextBlockItem], scene_pos) -> bool:
         """Checks if a scene position is within the item's resize area."""

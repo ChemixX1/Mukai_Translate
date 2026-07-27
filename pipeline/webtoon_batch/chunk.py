@@ -18,6 +18,7 @@ from modules.utils.exceptions import InsufficientCreditsException
 from modules.utils.image_utils import generate_mask
 from modules.utils.pipeline_config import get_config, get_inpainter_backend, inpaint_map
 from modules.utils.textblock import TextBlock, sort_blk_list
+from pipeline.inpaint_postprocess import make_masked_patch, postprocess_inpainted_result
 
 if TYPE_CHECKING:
     from .processor import WebtoonBatchProcessor
@@ -208,7 +209,16 @@ class ChunkMixin:
             return None, None
         inpainted = self.inpainting.inpainter_cache(image, mask, config)
         inpainted = imk.convert_scale_abs(inpainted)
-        return mask, inpainted
+        effective_mask = np.zeros_like(mask)
+        inpainted = postprocess_inpainted_result(
+            image,
+            mask,
+            inpainted,
+            edge_blend_px=2.5,
+            rebuild_entire_smooth_surface=True,
+            effective_mask_out=effective_mask,
+        )
+        return effective_mask, inpainted
 
     def _extract_page_patches_from_mask(
         self: WebtoonBatchProcessor,
@@ -228,7 +238,10 @@ class ChunkMixin:
             x, y, w, h = [int(v) for v in imk.bounding_rect(contour)]
             if w <= 0 or h <= 0:
                 continue
-            patch = inpainted[y : y + h, x : x + w]
+            patch = make_masked_patch(
+                inpainted[y : y + h, x : x + w],
+                mask[y : y + h, x : x + w],
+            )
             physical_y = y + int(y_offset)
             patches.append(
                 {

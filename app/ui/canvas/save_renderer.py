@@ -28,9 +28,15 @@ class ImageSaveRenderer:
 
 
     def img_array_to_qimage(self, rgb_img: np.ndarray) -> QtGui.QImage:
+        rgb_img = np.ascontiguousarray(rgb_img)
         height, width, channel = rgb_img.shape
         bytes_per_line = channel * width
-        return QtGui.QImage(rgb_img.data, width, height, bytes_per_line, QtGui.QImage.Format.Format_RGB888)
+        image_format = (
+            QtGui.QImage.Format.Format_RGBA8888
+            if channel == 4
+            else QtGui.QImage.Format.Format_RGB888
+        )
+        return QtGui.QImage(rgb_img.data, width, height, bytes_per_line, image_format)
 
     def add_state_to_image(self, state, page_idx=None, main_page=None):
         # Add spanning text items if we have the context to do so
@@ -378,7 +384,7 @@ class ImageSaveRenderer:
             if 'png_path' in patch:
                 patch_path = patch['png_path']
                 ensure_path_materialized(patch_path)
-                patch_image = imk.read_image(patch_path)
+                patch_image = imk.read_image(patch_path, preserve_alpha=True)
             else:
                 # Handle direct image data (expected to be RGB format)
                 patch_image = patch['image']

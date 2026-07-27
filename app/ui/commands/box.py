@@ -1,3 +1,4 @@
+import copy
 import numpy as np
 from PySide6.QtGui import QUndoCommand
 from PySide6.QtCore import QRectF, QPointF
@@ -246,6 +247,48 @@ class AddTextItemCommand(QUndoCommand, RectCommandBase):
             self.scene.removeItem(matching_txt_item)
             self.viewer.text_items.remove(matching_txt_item)
             self.scene.update()
+
+
+class PasteTextItemsCommand(QUndoCommand):
+    """Undoable duplication of one or more fully styled text boxes."""
+
+    def __init__(self, viewer, properties):
+        super().__init__(viewer.tr("Paste text box"))
+        self.viewer = viewer
+        self.properties = copy.deepcopy(list(properties))
+        self.items = []
+
+    def _select_created_items(self):
+        self.viewer.deselect_all()
+        for item in self.items:
+            item.setSelected(True)
+        if self.items:
+            self.items[-1].item_selected.emit(self.items[-1])
+
+    def redo(self):
+        if not self.items:
+            self.items = [
+                self.viewer.add_text_item(copy.deepcopy(properties))
+                for properties in self.properties
+            ]
+        else:
+            for item in self.items:
+                if item.scene() is None:
+                    self.viewer._scene.addItem(item)
+                if item not in self.viewer.text_items:
+                    self.viewer.text_items.append(item)
+        self._select_created_items()
+        self.viewer._scene.update()
+
+    def undo(self):
+        for item in self.items:
+            if item.scene() is self.viewer._scene:
+                item.handleDeselection()
+                self.viewer._scene.removeItem(item)
+            if item in self.viewer.text_items:
+                self.viewer.text_items.remove(item)
+        self.viewer.clear_text_edits.emit()
+        self.viewer._scene.update()
 
 
 class ReplaceDetectedBlocksCommand(QUndoCommand):

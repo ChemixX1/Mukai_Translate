@@ -276,6 +276,14 @@ def _mask_from_component_stats(
     if height * width > 150:
         max_area = int(0.50 * height * width)
         keep = keep & (area < max_area)
+        # Thin speech-bubble outlines have modest pixel area but span almost
+        # the complete crop in both directions. They must never enter the text
+        # mask or the inpainter will erase the visible contour.
+        crop_spanning = (
+            (w >= int(width * 0.72))
+            & (h >= int(height * 0.72))
+        )
+        keep = keep & ~crop_spanning
 
     if not np.any(keep):
         return np.zeros(binary_mask.shape[:2], dtype=np.uint8)

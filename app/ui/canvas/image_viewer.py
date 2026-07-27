@@ -1,3 +1,4 @@
+import copy
 import os
 import numpy as np
 from typing import List, Dict, Tuple
@@ -76,6 +77,7 @@ class ImageViewer(QGraphicsView):
         self.rotate_cursors = RotateHandleCursors()
         self.webtoon_view_state = {}
         self.magic_eraser_refine_with_sam = False
+        self.magic_eraser_mode_active = False
         self.style_paint_active = False
         self._style_paint_previous_cursor = None
 
@@ -85,6 +87,8 @@ class ImageViewer(QGraphicsView):
         # Item lists
         self.rectangles: list[MoveableRectItem] = []
         self.text_items: list[TextBlockItem] = []
+        self._copied_text_boxes: list[TextItemProperties] = []
+        self._text_box_paste_count = 0
         self.watermark_items: list[WatermarkItem] = []
         self.watermark_pending: WatermarkItem = None
         self.watermark_cleanup_active = False
@@ -220,6 +224,11 @@ class ImageViewer(QGraphicsView):
         """Mark the current brush operation for optional SAM mask refinement."""
         self.magic_eraser_refine_with_sam = bool(enabled)
 
+    def set_magic_eraser_mode(self, enabled: bool, *, refine_with_sam: bool = False) -> None:
+        """Arm/disarm strict brush-only inpainting independently from SAM."""
+        self.magic_eraser_mode_active = bool(enabled)
+        self.magic_eraser_refine_with_sam = bool(enabled and refine_with_sam)
+
     @property
     def brush_size(self):
         return self.drawing_manager.brush_size
@@ -256,6 +265,17 @@ class ImageViewer(QGraphicsView):
         self.event_handler.handle_wheel(event)
 
     def keyPressEvent(self, event):
+        editing_text = any(
+            item.editing_mode for item in self.get_selected_text_items()
+        )
+        if not editing_text and event.matches(QtGui.QKeySequence.StandardKey.Copy):
+            if self.copy_selected_text_boxes():
+                event.accept()
+                return
+        if not editing_text and event.matches(QtGui.QKeySequence.StandardKey.Paste):
+            if self.paste_copied_text_boxes():
+                event.accept()
+                return
         if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             selected_watermarks = self.get_selected_watermark_items()
             if selected_watermarks:
@@ -264,6 +284,39 @@ class ImageViewer(QGraphicsView):
                 event.accept()
                 return
         super().keyPressEvent(event)
+
+    def copy_selected_text_boxes(self) -> bool:
+        """Copy complete text-box state without entering character editing."""
+        selected = [
+            item for item in self.get_selected_text_items()
+            if not item.editing_mode
+        ]
+        if not selected:
+            return False
+        self._copied_text_boxes = [
+            copy.deepcopy(TextItemProperties.from_text_item(item))
+            for item in selected
+        ]
+        self._text_box_paste_count = 0
+        return True
+
+    def paste_copied_text_boxes(self) -> bool:
+        """Paste copied boxes with a small cascading offset and undo support."""
+        if not self._copied_text_boxes or not self.hasPhoto():
+            return False
+        self._text_box_paste_count += 1
+        offset = 12.0 * self._text_box_paste_count
+        properties = copy.deepcopy(self._copied_text_boxes)
+        for props in properties:
+            x, y = props.position
+            proposed = self.constrain_point(QPointF(x + offset, y + offset))
+            props.position = (proposed.x(), proposed.y())
+
+        # QUndoStack.push invokes redo, so no item is inserted twice.
+        from ..commands.box import PasteTextItemsCommand
+
+        self.command_emitted.emit(PasteTextItemsCommand(self, properties))
+        return True
 
     def viewportEvent(self, event):
         return self.event_handler.handle_viewport_event(event)
@@ -495,8 +548,8 @@ class ImageViewer(QGraphicsView):
             self.photo.setPixmap(QtGui.QPixmap())
         self.zoom = 0
 
-    def get_mask_for_inpainting(self):
-        mask = self.drawing_manager.generate_mask_from_strokes()
+    def get_mask_for_inpainting(self, *, strict: bool = False):
+        mask = self.drawing_manager.generate_mask_from_strokes(expand=not strict)
         return mask
     
     def create_rect_item(self, rect: QRectF, scene_pos: QPointF = None) -> MoveableRectItem:

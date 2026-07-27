@@ -6,6 +6,7 @@ import requests
 import logging
 import traceback
 import imkit as imk
+import numpy as np
 import time
 from typing import TYPE_CHECKING
 from datetime import datetime
@@ -31,6 +32,7 @@ from app.ui.messages import Messages
 from .cache_manager import CacheManager
 from .block_detection import BlockDetectionHandler
 from .inpainting import InpaintingHandler
+from .inpaint_postprocess import postprocess_inpainted_result
 from .ocr_handler import OCRHandler
 from modules.ocr.processor import get_effective_ocr_settings
 
@@ -241,6 +243,16 @@ class BatchProcessor:
 
             inpaint_input_img = self.inpainting.inpainter_cache(image, mask, config)
             inpaint_input_img = imk.convert_scale_abs(inpaint_input_img)
+            effective_mask = np.zeros_like(mask)
+            inpaint_input_img = postprocess_inpainted_result(
+                image,
+                mask,
+                inpaint_input_img,
+                edge_blend_px=2.5,
+                rebuild_entire_smooth_surface=True,
+                effective_mask_out=effective_mask,
+            )
+            mask = effective_mask
 
             # Saving cleaned image
             patches = self.inpainting.get_inpainted_patches(mask, inpaint_input_img)

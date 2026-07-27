@@ -1,4 +1,5 @@
 import abc
+from dataclasses import replace
 from typing import Optional
 
 import numpy as np
@@ -79,6 +80,108 @@ class InpaintModel:
     def forward_post_process(self, result, image, mask, config):
         return result, image, mask
 
+    @staticmethod
+    def _merge_nearby_mask_boxes(
+        boxes,
+        image_shape: tuple[int, int],
+        gap: int,
+    ) -> list[np.ndarray]:
+        """Merge glyph fragments that belong to one local inpaint region.
+
+        Pixel-accurate manga masks contain one contour per letter, outline
+        fragment or punctuation mark. Running a large neural crop for every
+        contour is both slow and can exhaust ONNX memory on long webtoons.
+        """
+        height, width = image_shape[:2]
+        merged = [np.asarray(box, dtype=np.int32).copy() for box in boxes]
+        gap = max(0, int(gap))
+        changed = True
+        while changed:
+            changed = False
+            output = []
+            while merged:
+                current = merged.pop()
+                index = 0
+                while index < len(merged):
+                    candidate = merged[index]
+                    overlaps = not (
+                        current[2] + gap < candidate[0]
+                        or candidate[2] + gap < current[0]
+                        or current[3] + gap < candidate[1]
+                        or candidate[3] + gap < current[1]
+                    )
+                    if not overlaps:
+                        index += 1
+                        continue
+                    current = np.array(
+                        [
+                            min(current[0], candidate[0]),
+                            min(current[1], candidate[1]),
+                            max(current[2], candidate[2]),
+                            max(current[3], candidate[3]),
+                        ],
+                        dtype=np.int32,
+                    )
+                    merged.pop(index)
+                    changed = True
+                    index = 0
+                current[::2] = np.clip(current[::2], 0, width)
+                current[1::2] = np.clip(current[1::2], 0, height)
+                output.append(current)
+            merged = output
+        return sorted(merged, key=lambda box: (int(box[1]), int(box[0])))
+
+    def _run_crop_strategy(
+        self,
+        image: np.ndarray,
+        mask: np.ndarray,
+        config: Config,
+        *,
+        crop_margin: int,
+    ) -> np.ndarray:
+        boxes = boxes_from_mask(mask)
+        if not boxes:
+            return image.copy()
+        merge_gap = max(32, min(192, int(crop_margin * 0.55)))
+        boxes = self._merge_nearby_mask_boxes(
+            boxes,
+            image.shape[:2],
+            merge_gap,
+        )
+        local_config = replace(
+            config,
+            hd_strategy=HDStrategy.ORIGINAL,
+            hd_strategy_crop_margin=int(crop_margin),
+        )
+        logger.info(
+            "Run native crop strategy: %d merged regions, margin=%d",
+            len(boxes),
+            crop_margin,
+        )
+        inpaint_result = image.copy()
+        for box in boxes:
+            crop_image, crop_box = self._run_box(
+                image,
+                mask,
+                box,
+                local_config,
+            )
+            x1, y1, x2, y2 = crop_box
+            inpaint_result[y1:y2, x1:x2, :] = crop_image
+        return inpaint_result
+
+    def _adaptive_crop_margin(self, mask: np.ndarray) -> int:
+        boxes = boxes_from_mask(mask)
+        if not boxes:
+            return 128
+        grouped = self._merge_nearby_mask_boxes(boxes, mask.shape[:2], 96)
+        spans = [
+            max(int(box[2] - box[0]), int(box[3] - box[1]))
+            for box in grouped
+        ]
+        typical_span = float(np.median(spans)) if spans else 256.0
+        return int(np.clip(round(typical_span * 0.38), 112, 256))
+
     def __call__(self, image, mask, config: Config):
         """
         images: [H, W, C] RGB, not normalized
@@ -100,20 +203,36 @@ class InpaintModel:
             logger.info(f"hd_strategy: {config.hd_strategy}")
             if config.hd_strategy == HDStrategy.CROP:
                 if max(image.shape) > config.hd_strategy_crop_trigger_size:
-                    logger.info(f"Run crop strategy")
-                    boxes = boxes_from_mask(mask)
-                    crop_result = []
-                    for box in boxes:
-                        crop_image, crop_box = self._run_box(image, mask, box, config)
-                        crop_result.append((crop_image, crop_box))
-
-                    inpaint_result = image
-                    for crop_image, crop_box in crop_result:
-                        x1, y1, x2, y2 = crop_box
-                        inpaint_result[y1:y2, x1:x2, :] = crop_image
+                    inpaint_result = self._run_crop_strategy(
+                        image,
+                        mask,
+                        config,
+                        crop_margin=config.hd_strategy_crop_margin,
+                    )
 
             elif config.hd_strategy == HDStrategy.RESIZE:
                 if max(image.shape) > config.hd_strategy_resize_limit:
+                    resize_ratio = (
+                        float(config.hd_strategy_resize_limit)
+                        / float(max(image.shape[:2]))
+                    )
+                    mask_coverage = float(np.count_nonzero(mask)) / max(
+                        1.0,
+                        float(mask.shape[0] * mask.shape[1]),
+                    )
+                    if resize_ratio < 0.45 and mask_coverage < 0.30:
+                        # Long webtoons would otherwise shrink from e.g.
+                        # 800x5000 to 154x960, making translucent lettering too
+                        # small for AOT/LaMa to erase. Process a few native
+                        # merged crops while keeping the user's selected model.
+                        inpaint_result = self._run_crop_strategy(
+                            image,
+                            mask,
+                            config,
+                            crop_margin=self._adaptive_crop_margin(mask),
+                        )
+
+                if inpaint_result is None and max(image.shape) > config.hd_strategy_resize_limit:
                     origin_size = image.shape[:2]
                     downsize_image = resize_max_size(
                         image, size_limit=config.hd_strategy_resize_limit

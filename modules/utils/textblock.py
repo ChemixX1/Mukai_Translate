@@ -30,6 +30,7 @@ class TextBlock(object):
                  max_font_size: int = 0,
                  font_color: tuple = (),
                  direction: str = "",
+                 mask_hue: int | None = None,
                  **kwargs) -> None:
         
         self.xyxy = text_bbox
@@ -58,6 +59,10 @@ class TextBlock(object):
         self.max_font_size = max_font_size
         self.font_color = font_color
         self.direction = direction
+        # Optional high-confidence hue supplied by the supplemental stylized
+        # text detector. It lets inpainting isolate coloured SFX strokes from
+        # detailed artwork without changing normal text masks.
+        self.mask_hue = mask_hue
 
     @property
     def xywh(self):
@@ -107,6 +112,8 @@ class TextBlock(object):
         new_block.min_font_size = self.min_font_size
         new_block.max_font_size = self.max_font_size
         new_block.font_color = self.font_color
+        new_block.direction = self.direction
+        new_block.mask_hue = self.mask_hue
         
         return new_block
 

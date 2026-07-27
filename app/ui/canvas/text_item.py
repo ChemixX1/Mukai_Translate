@@ -1,8 +1,9 @@
 from PySide6.QtWidgets import QGraphicsTextItem, QGraphicsItem, \
      QApplication, QWidget, QStyle, QStyleOptionGraphicsItem
 from PySide6.QtGui import QFont, QCursor, QColor, QBrush, QGradient, \
-     QLinearGradient, QRadialGradient, QTextCharFormat, QTextBlockFormat, QTextCursor, QPainter, QImage, QPen
+     QLinearGradient, QRadialGradient, QTextCharFormat, QTextBlockFormat, QTextCursor, QPainter, QImage, QPen, QPainterPath
 from PySide6.QtCore import Qt, QRectF, Signal, QPointF, QTimer
+from PySide6 import QtGui
 from app.ui.dayu_widgets import dayu_theme
 from PIL import Image
 import math, copy, re
@@ -43,7 +44,14 @@ class TextBlockState:
     @classmethod
     def from_item(cls, item: QGraphicsTextItem):
         """Create TextBlockState from a TextBlockItem"""
-        rect = QRectF(item.pos(), item.boundingRect().size()).getCoords()
+        # Selection controls can extend below the painted text. They are UI
+        # chrome, not part of the editable box persisted into TextBlock.
+        item_rect = (
+            item.interaction_rect()
+            if hasattr(item, "interaction_rect")
+            else item.boundingRect()
+        )
+        rect = QRectF(item.pos(), item_rect.size()).getCoords()
         return cls(
             rect=rect,
             rotation=item.rotation(),
@@ -219,7 +227,7 @@ class TextBlockItem(QGraphicsTextItem):
         self.update()
 
     def setCenterTransform(self):
-        center = self.boundingRect().center()
+        center = self.interaction_rect().center()
         self.setTransformOriginPoint(center)
 
     def on_document_enlarged(self):
@@ -559,7 +567,7 @@ class TextBlockItem(QGraphicsTextItem):
         self.prepareGeometryChange()
         self.text_warp = normalised
         self._invalidate_layer_effect_cache()
-        self.setTransformOriginPoint(self.boundingRect().center())
+        self.setTransformOriginPoint(self.interaction_rect().center())
         self.update()
 
     def _has_text_warp(self) -> bool:
@@ -749,17 +757,57 @@ class TextBlockItem(QGraphicsTextItem):
     def _layer_effect_margin(self) -> float:
         return float(effect_margin(getattr(self, 'fill_style', {})))
 
+    def _selection_outline_margin(self) -> float:
+        """Return the real outward radius of the widest editable outline."""
+        widths = []
+        for outline_info in self.selection_outlines:
+            try:
+                widths.append(float(outline_info.width))
+            except (AttributeError, TypeError, ValueError):
+                continue
+        return max(0.0, max(widths, default=0.0))
+
     def boundingRect(self) -> QRectF:  # noqa: N802 - Qt API name
         rect = self._content_bounding_rect()
         margin = self._layer_effect_margin()
         warp_x, warp_y = self._warp_margins()
         three_d_x, three_d_y = self._three_d_margins()
-        return rect.adjusted(
+        painted_rect = rect.adjusted(
             -(margin + warp_x + three_d_x),
             -(margin + warp_y + three_d_y),
             margin + warp_x + three_d_x,
             margin + warp_y + three_d_y,
         ) if margin or warp_x or warp_y or three_d_x or three_d_y else rect
+        outline_margin = self._selection_outline_margin()
+        if outline_margin:
+            # QTextCharFormat strokes are centred on the glyph edge. The
+            # original fill hides the inner half, leaving this exact radius
+            # outside. Keep it in the scene geometry so thick commas and
+            # capitals are never clipped.
+            painted_rect = painted_rect.united(
+                rect.adjusted(
+                    -(outline_margin + 1.0),
+                    -(outline_margin + 1.0),
+                    outline_margin + 1.0,
+                    outline_margin + 1.0,
+                )
+            )
+        if self.isSelected():
+            # Reserve enough local paint area for a fixed-size rotation
+            # control at the smallest normal editor zoom. This area only
+            # exists while selected and is never serialised or exported.
+            handle_area = QRectF(
+                rect.center().x() - 90.0,
+                rect.bottom(),
+                180.0,
+                340.0,
+            )
+            painted_rect = painted_rect.united(handle_area)
+        return painted_rect
+
+    def shape(self) -> QPainterPath:
+        """Keep transparent selection padding out of normal item hit-testing."""
+        return super().shape()
 
     def set_color(self, color):
         """Set a solid fill, preserving the current glow settings."""
@@ -774,6 +822,7 @@ class TextBlockItem(QGraphicsTextItem):
 
     def update_outlines(self):
         """Update the selection outlines when text changes"""
+        self._invalidate_layer_effect_cache()
         if self.outline:
             # Create an outline for the entire document
             doc = self.document()
@@ -801,6 +850,10 @@ class TextBlockItem(QGraphicsTextItem):
         self.update() 
 
     def set_outline(self, outline_color, outline_width):
+        # Outline width contributes to boundingRect, so notify the scene
+        # before changing the stored ranges.
+        self.prepareGeometryChange()
+        self._invalidate_layer_effect_cache()
         # Initialize start and end variables
         start = 0
         end = 0
@@ -928,29 +981,40 @@ class TextBlockItem(QGraphicsTextItem):
 
         doc = self._clone_document_for_effects()
         painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         cursor = QTextCursor(doc)
         cursor.select(QTextCursor.SelectionType.Document)
-        fmt = cursor.charFormat()
-        fmt.setForeground(QColor(0, 0, 0, 0))
-        cursor.mergeCharFormat(fmt)
+        transparent_format = QTextCharFormat()
+        transparent_format.setForeground(QColor(0, 0, 0, 0))
+        transparent_format.setTextOutline(QPen(Qt.PenStyle.NoPen))
+        cursor.mergeCharFormat(transparent_format)
 
         for outline_info in self.selection_outlines:
+            try:
+                outline_width = max(0.0, float(outline_info.width))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if outline_width <= 0.0:
+                continue
             cursor.setPosition(outline_info.start)
             cursor.setPosition(outline_info.end, QTextCursor.KeepAnchor)
-            fmt = cursor.charFormat()
-            fmt.setForeground(outline_info.color)
-            cursor.mergeCharFormat(fmt)
-            offsets = [
-                (dx, dy)
-                for dx in (-outline_info.width, 0, outline_info.width)
-                for dy in (-outline_info.width, 0, outline_info.width)
-                if dx != 0 or dy != 0
-            ]
-            for dx, dy in offsets:
-                painter.save()
-                painter.translate(dx, dy)
-                doc.drawContents(painter)
-                painter.restore()
+            outline_pen = QPen(outline_info.color)
+            # Qt centres the pen on the glyph path. Doubling the requested
+            # radius gives an outer contour of exactly outline_width after the
+            # normal text fill is painted over its inner half.
+            outline_pen.setWidthF(outline_width * 2.0)
+            outline_pen.setStyle(Qt.PenStyle.SolidLine)
+            outline_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            outline_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            outline_format = QTextCharFormat()
+            outline_format.setForeground(QColor(0, 0, 0, 0))
+            outline_format.setTextOutline(outline_pen)
+            cursor.mergeCharFormat(outline_format)
+
+        # One vector draw replaces the former eight shifted copies. Curves,
+        # joins and punctuation now share the same geometric contour.
+        doc.drawContents(painter)
         painter.restore()
 
     def _warp_render_scale(self, painter: QPainter | None = None) -> float:
@@ -984,15 +1048,23 @@ class TextBlockItem(QGraphicsTextItem):
             return None
 
         content_rect = self._content_bounding_rect()
+        outline_margin = self._selection_outline_margin()
+        source_rect = content_rect.adjusted(
+            -outline_margin,
+            -outline_margin,
+            outline_margin,
+            outline_margin,
+        ) if outline_margin else content_rect
         scale = float(render_scale or self._warp_render_scale())
-        pixel_width = max(1, int(math.ceil(content_rect.width() * scale)))
-        pixel_height = max(1, int(math.ceil(content_rect.height() * scale)))
+        pixel_width = max(1, int(math.ceil(source_rect.width() * scale)))
+        pixel_height = max(1, int(math.ceil(source_rect.height() * scale)))
         cache_key = (
             'warp',
             self.document().revision(),
             round(content_rect.x(), 3), round(content_rect.y(), 3),
             round(content_rect.width(), 3), round(content_rect.height(), 3),
-            repr(self.fill_style), repr(self.text_warp), bool(self.vertical),
+            repr(self.fill_style), repr(self.text_warp),
+            repr(self.selection_outlines), bool(self.vertical),
             pixel_width, pixel_height,
         )
         if self._layer_effect_cache and self._layer_effect_cache[0] == cache_key:
@@ -1008,7 +1080,7 @@ class TextBlockItem(QGraphicsTextItem):
         content_painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         content_painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         content_painter.scale(scale, scale)
-        content_painter.translate(-content_rect.left(), -content_rect.top())
+        content_painter.translate(-source_rect.left(), -source_rect.top())
         self._paint_selection_outlines(content_painter)
         self.document().drawContents(content_painter)
         content_painter.end()
@@ -1023,7 +1095,7 @@ class TextBlockItem(QGraphicsTextItem):
         mask_painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         mask_painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         mask_painter.scale(scale, scale)
-        mask_painter.translate(-content_rect.left(), -content_rect.top())
+        mask_painter.translate(-source_rect.left(), -source_rect.top())
         mask_doc = self._clone_document_for_effects()
         mask_cursor = QTextCursor(mask_doc)
         mask_cursor.select(QTextCursor.SelectionType.Document)
@@ -1092,8 +1164,8 @@ class TextBlockItem(QGraphicsTextItem):
             overlay = rgba_array_to_qimage(three_d_overlay)
 
         target_rect = QRectF(
-            content_rect.left() - ((pad_x + effect_px) / scale),
-            content_rect.top() - ((pad_y + effect_px) / scale),
+            source_rect.left() - ((pad_x + effect_px) / scale),
+            source_rect.top() - ((pad_y + effect_px) / scale),
             content_qimage.width() / scale,
             content_qimage.height() / scale,
         )
@@ -1144,7 +1216,7 @@ class TextBlockItem(QGraphicsTextItem):
         self._paint_selection_frame(painter)
 
     def _paint_selection_frame(self, painter: QPainter) -> None:
-        """Paint a Canva-like solid selection frame with six visible handles."""
+        """Paint a solid selection frame, resize handles and rotation control."""
         if not self.selected:
             return
 
@@ -1158,7 +1230,14 @@ class TextBlockItem(QGraphicsTextItem):
         corner_radius = 4.0 / view_scale
         side_half_width = 2.2 / view_scale
         side_half_height = 7.0 / view_scale
-        selection_colour = QColor(dayu_theme.primary_color)
+        # The fully black theme intentionally uses a black text-box frame.
+        # Keep the blue and light themes on their existing cyan/pink accents;
+        # only the selection frame and its six handles are decoupled here.
+        selection_colour = QColor(
+            "#000000"
+            if dayu_theme.background_color.lower() == "#000000"
+            else dayu_theme.primary_color
+        )
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -1193,7 +1272,76 @@ class TextBlockItem(QGraphicsTextItem):
                 side_half_width,
                 side_half_width,
             )
+
+        # Canva-like rotation control: it lives below (not on) the lower edge
+        # and remains the same apparent size at every canvas zoom.
+        connector_length = 13.0 / view_scale
+        rotation_radius = 7.5 / view_scale
+        rotation_center = self.rotation_handle_center(view_scale)
+        painter.drawLine(
+            QPointF(rect.center().x(), rect.bottom()),
+            QPointF(rect.center().x(), rect.bottom() + connector_length),
+        )
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawEllipse(rotation_center, rotation_radius, rotation_radius)
+
+        icon_pen = QPen(selection_colour, 1.4)
+        icon_pen.setCosmetic(True)
+        icon_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(icon_pen)
+        icon_rect = QRectF(
+            rotation_center.x() - (3.8 / view_scale),
+            rotation_center.y() - (3.8 / view_scale),
+            7.6 / view_scale,
+            7.6 / view_scale,
+        )
+        painter.drawArc(icon_rect, 35 * 16, 250 * 16)
+        arrow_tip = QPointF(
+            rotation_center.x() + (3.2 / view_scale),
+            rotation_center.y() - (2.0 / view_scale),
+        )
+        painter.drawLine(
+            arrow_tip,
+            QPointF(
+                arrow_tip.x() - (2.8 / view_scale),
+                arrow_tip.y() - (0.3 / view_scale),
+            ),
+        )
+        painter.drawLine(
+            arrow_tip,
+            QPointF(
+                arrow_tip.x() - (0.7 / view_scale),
+                arrow_tip.y() + (2.5 / view_scale),
+            ),
+        )
         painter.restore()
+
+    def rotation_handle_center(self, view_scale: float | None = None) -> QPointF:
+        """Return the local centre of the visible rotation control."""
+        if view_scale is None:
+            view_scale = 1.0
+            scene = self.scene()
+            views = scene.views() if scene is not None else []
+            if views:
+                transform = self.deviceTransform(views[0].viewportTransform())
+                view_scale = max(
+                    0.001,
+                    math.hypot(transform.m11(), transform.m12()),
+                    math.hypot(transform.m21(), transform.m22()),
+                )
+        rect = self.interaction_rect()
+        return QPointF(
+            rect.center().x(),
+            rect.bottom() + (24.0 / max(0.001, float(view_scale))),
+        )
+
+    def setSelected(self, selected: bool) -> None:  # noqa: N802 - Qt API name
+        selected = bool(selected)
+        if selected != self.isSelected():
+            self.prepareGeometryChange()
+        super().setSelected(selected)
+        self.selected = selected
+        self.update()
 
     @staticmethod
     def _normalise_font_weight(weight) -> int:
@@ -1281,6 +1429,21 @@ class TextBlockItem(QGraphicsTextItem):
             super().mousePressEvent(event)
 
     def keyPressEvent(self, event):
+
+        if not self.editing_mode:
+            scene = self.scene()
+            views = scene.views() if scene is not None else []
+            viewer = views[0] if views else None
+            if event.matches(QtGui.QKeySequence.StandardKey.Copy):
+                if viewer is not None and hasattr(viewer, "copy_selected_text_boxes"):
+                    viewer.copy_selected_text_boxes()
+                    event.accept()
+                    return
+            if event.matches(QtGui.QKeySequence.StandardKey.Paste):
+                if viewer is not None and hasattr(viewer, "paste_copied_text_boxes"):
+                    viewer.paste_copied_text_boxes()
+                    event.accept()
+                    return
 
         if (
             not self.editing_mode
@@ -1467,7 +1630,7 @@ class TextBlockItem(QGraphicsTextItem):
 
     def init_rotation(self, scene_pos):
         self.rotating = True
-        center = self.boundingRect().center()
+        center = self.interaction_rect().center()
         self.center_scene_pos = self.mapToScene(center)
         self.last_rotation_angle = math.degrees(math.atan2(
             scene_pos.y() - self.center_scene_pos.y(),
@@ -1479,7 +1642,7 @@ class TextBlockItem(QGraphicsTextItem):
         new_pos = self.pos() + delta
         
         # Calculate the bounding rect of the rotated rectangle in scene coordinates
-        scene_rect = self.mapToScene(self.boundingRect())
+        scene_rect = self.mapToScene(self.interaction_rect())
         bounding_rect = scene_rect.boundingRect()
         
         # Get constraint bounds
@@ -1504,7 +1667,7 @@ class TextBlockItem(QGraphicsTextItem):
         self.setPos(new_pos)
 
     def rotate_item(self, scene_pos):
-        self.setTransformOriginPoint(self.boundingRect().center())
+        self.setTransformOriginPoint(self.interaction_rect().center())
         current_angle = math.degrees(math.atan2(
             scene_pos.y() - self.center_scene_pos.y(),
             scene_pos.x() - self.center_scene_pos.x()

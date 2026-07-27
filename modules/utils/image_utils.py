@@ -107,17 +107,117 @@ def build_block_mask_data(
     if crop.size == 0:
         return None, None
 
-    crop_mask = detect_content_mask_in_bbox(crop)
+    mask_hue = getattr(blk, "mask_hue", None)
+    if mask_hue is not None:
+        import cv2
+
+        hsv = cv2.cvtColor(
+            np.ascontiguousarray(crop[..., :3], dtype=np.uint8),
+            cv2.COLOR_RGB2HSV,
+        )
+        hue_difference = np.abs(hsv[..., 0].astype(np.int16) - int(mask_hue))
+        hue_difference = np.minimum(hue_difference, 180 - hue_difference)
+        crop_mask = np.where(
+            (hue_difference <= 12)
+            & (hsv[..., 1] >= 60)
+            & (hsv[..., 2] >= 45),
+            255,
+            0,
+        ).astype(np.uint8)
+        # Include black punctuation/shadows that share the same bright outline
+        # as the coloured SFX. Background architecture normally lacks this
+        # low-saturation white rim and is therefore left untouched.
+        gray = cv2.cvtColor(
+            np.ascontiguousarray(crop[..., :3], dtype=np.uint8),
+            cv2.COLOR_RGB2GRAY,
+        )
+        bright = (
+            (hsv[..., 2] >= 185)
+            & (hsv[..., 1] <= 80)
+        ).astype(np.uint8)
+        near_bright = cv2.dilate(
+            bright,
+            np.ones((11, 11), dtype=np.uint8),
+            iterations=1,
+        ) > 0
+        outlined_dark = ((gray <= 75) & near_bright).astype(np.uint8)
+        distance_to_colour = cv2.distanceTransform(
+            (crop_mask == 0).astype(np.uint8),
+            cv2.DIST_L2,
+            5,
+        )
+        maximum_dark_distance = max(
+            48.0,
+            min(96.0, min(crop_mask.shape[:2]) * 0.30),
+        )
+        count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+            outlined_dark,
+            8,
+        )
+        dark_mask = np.zeros_like(crop_mask, dtype=np.uint8)
+        for label_id in range(1, count):
+            x, y, width, height, area = [
+                int(value) for value in stats[label_id]
+            ]
+            component = labels == label_id
+            close_to_colour = (
+                float(np.min(distance_to_colour[component]))
+                <= maximum_dark_distance
+            )
+            if (
+                4 <= area <= 3000
+                and width <= 100
+                and height <= 100
+                and close_to_colour
+            ):
+                dark_mask[component] = 255
+        crop_mask = np.where(
+            (crop_mask > 0) | (dark_mask > 0),
+            255,
+            0,
+        ).astype(np.uint8)
+    else:
+        crop_mask = detect_content_mask_in_bbox(crop)
     if crop_mask is None or not np.any(crop_mask):
         return None, None
+
+    if (
+        getattr(blk, "text_class", None) == "text_bubble"
+        and getattr(blk, "xyxy", None) is not None
+    ):
+        # Detection uses the wider bubble crop for model context, but the mask
+        # itself must remain focused on the neural text box. This excludes the
+        # bubble fill and black outline even when Otsu classifies them as large
+        # foreground components.
+        from modules.utils.textblock import adjust_text_line_coordinates
+
+        tx1, ty1, tx2, ty2 = adjust_text_line_coordinates(
+            blk.xyxy,
+            12,
+            12,
+            img,
+        )
+        focus = np.zeros_like(crop_mask, dtype=np.uint8)
+        fx1 = max(0, min(crop_mask.shape[1], int(tx1 - cx1)))
+        fy1 = max(0, min(crop_mask.shape[0], int(ty1 - cy1)))
+        fx2 = max(0, min(crop_mask.shape[1], int(tx2 - cx1)))
+        fy2 = max(0, min(crop_mask.shape[0], int(ty2 - cy1)))
+        if fx2 > fx1 and fy2 > fy1:
+            focus[fy1:fy2, fx1:fx2] = 255
+            crop_mask = np.where(focus > 0, crop_mask, 0).astype(np.uint8)
 
     close_kernel = imk.get_structuring_element(imk.MORPH_RECT, (3, 3))
     crop_mask = imk.morphology_ex(crop_mask, imk.MORPH_CLOSE, close_kernel)
     kernel_size = max(1, int(default_padding))
+    # High-resolution Japanese lettering commonly has a contrasting outer
+    # stroke. Resolution-aware extra passes give that halo a clean background
+    # margin for seamless compositing without replacing the configured inpainter.
+    long_edge = max(img.shape[:2])
+    outline_iterations = 5 if long_edge >= 2400 else (4 if long_edge >= 1400 else 3)
     dilated = imk.dilate(
         crop_mask,
         np.ones((kernel_size, kernel_size), np.uint8),
-        iterations=3,
+        iterations=outline_iterations,
     )
     if (
         clip_to_bubble

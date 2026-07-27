@@ -314,7 +314,12 @@ class EventHandler:
             return False
 
         local_pos = sel_item.mapFromScene(scene_pos)
-        if sel_item.boundingRect().contains(local_pos):
+        interaction_rect = (
+            sel_item.interaction_rect()
+            if isinstance(sel_item, TextBlockItem)
+            else sel_item.boundingRect()
+        )
+        if interaction_rect.contains(local_pos):
             self.dragged_item = sel_item
             # Store the initial position for drag calculations
             self.last_scene_pos = scene_pos
@@ -426,7 +431,10 @@ class EventHandler:
                                            -self.viewer.interaction_manager.rotate_margin_max, 
                                            self.viewer.interaction_manager.rotate_margin_max, 
                                            self.viewer.interaction_manager.rotate_margin_max)
-            sel_item.rot_handle = self.viewer.interaction_manager.get_rotate_handle(outer_rect, sel_item.mapFromScene(scene_pos), angle)
+            if isinstance(sel_item, TextBlockItem):
+                sel_item.rot_handle = "bottom"
+            else:
+                sel_item.rot_handle = self.viewer.interaction_manager.get_rotate_handle(outer_rect, sel_item.mapFromScene(scene_pos), angle)
             if sel_item.rot_handle:
                 sel_item.init_rotation(scene_pos)
                 # Record state for undo purposes (instead of calling mousePressEvent which expects QGraphicsSceneMouseEvent)
@@ -436,7 +444,11 @@ class EventHandler:
                     sel_item.old_state = RectState.from_item(sel_item)
                 # Set cursor for rotation operation
                 local_pos = sel_item.mapFromScene(scene_pos)
-                cursor = self.viewer.interaction_manager.get_rotation_cursor(outer_rect, local_pos, angle)
+                cursor = (
+                    self.viewer.rotate_cursors.get_cursor("bottom")
+                    if isinstance(sel_item, TextBlockItem)
+                    else self.viewer.interaction_manager.get_rotation_cursor(outer_rect, local_pos, angle)
+                )
                 self.viewer.viewport().setCursor(cursor)
                 event.accept()
                 return True
@@ -530,7 +542,11 @@ class EventHandler:
                                            -self.viewer.interaction_manager.rotate_margin_max, 
                                            self.viewer.interaction_manager.rotate_margin_max, 
                                            self.viewer.interaction_manager.rotate_margin_max)
-            cursor = self.viewer.interaction_manager.get_rotation_cursor(outer_rect, local_pos, sel_item.rotation())
+            cursor = (
+                self.viewer.rotate_cursors.get_cursor("bottom")
+                if isinstance(sel_item, TextBlockItem)
+                else self.viewer.interaction_manager.get_rotation_cursor(outer_rect, local_pos, sel_item.rotation())
+            )
             self.viewer.viewport().setCursor(cursor)
             return True
         

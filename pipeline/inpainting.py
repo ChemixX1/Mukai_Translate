@@ -9,6 +9,7 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPen, QBrush
 from app.sam_mask_refiner import SAMMaskRefiner
 from modules.utils.device import resolve_device
 from modules.utils.pipeline_config import inpaint_map, get_config, get_inpainter_backend
+from pipeline.inpaint_postprocess import make_masked_patch, postprocess_inpainted_result
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,12 @@ class InpaintingHandler:
         config = get_config(settings_page)
         inpaint_input_img = self.inpainter_cache(image, mask, config)
         inpaint_input_img = imk.convert_scale_abs(inpaint_input_img) 
+        inpaint_input_img = postprocess_inpainted_result(
+            image,
+            mask,
+            inpaint_input_img,
+            edge_blend_px=2.0,
+        )
 
         return inpaint_input_img
 
@@ -65,7 +72,10 @@ class InpaintingHandler:
         """Run SAM over the painted mask, then inpaint with the selected engine."""
         image_viewer = self.main_page.image_viewer
         settings_page = self.main_page.settings_page
-        rough_mask = image_viewer.get_mask_for_inpainting()
+        # The non-expanded brush footprint is the only region the user has
+        # authorised us to alter.  SAM may provide a little extra model
+        # context, but it can never enlarge the final composite.
+        rough_mask = image_viewer.get_mask_for_inpainting(strict=True)
 
         if self.main_page.webtoon_mode:
             image, _mappings = image_viewer.get_visible_area_image()
@@ -75,12 +85,28 @@ class InpaintingHandler:
         if image is None or rough_mask is None:
             return []
 
-        refined_mask = self.sam_mask_refiner.refine(image, rough_mask)
+        use_sam = bool(
+            getattr(image_viewer, "magic_eraser_refine_with_sam", False)
+        )
+        refined_mask = (
+            self.sam_mask_refiner.refine(image, rough_mask)
+            if use_sam
+            else rough_mask
+        )
         self._ensure_inpainter()
         config = get_config(settings_page)
         inpainted_image = self.inpainter_cache(image, refined_mask, config)
         inpainted_image = imk.convert_scale_abs(inpainted_image)
-        return self.get_inpainted_patches(refined_mask, inpainted_image)
+        effective_mask = np.zeros_like(rough_mask)
+        inpainted_image = postprocess_inpainted_result(
+            image,
+            rough_mask,
+            inpainted_image,
+            edge_blend_px=2.5,
+            rebuild_entire_smooth_surface=True,
+            effective_mask_out=effective_mask,
+        )
+        return self.get_inpainted_patches(effective_mask, inpainted_image)
 
     def _qimage_to_np(self, qimg: QImage):
         if qimg.width() <= 0 or qimg.height() <= 0:
@@ -147,7 +173,10 @@ class InpaintingHandler:
         patches = []
         for c in contours:
             x, y, w, h = imk.bounding_rect(c)
-            patch = inpainted_image[y:y + h, x:x + w]
+            patch = make_masked_patch(
+                inpainted_image[y:y + h, x:x + w],
+                mask[y:y + h, x:x + w],
+            )
             patches.append({'bbox': [x, y, w, h], 'image': patch.copy()})
         return patches
 
@@ -159,6 +188,12 @@ class InpaintingHandler:
         config = get_config(self.main_page.settings_page)
         inpainted = self.inpainter_cache(image, mask, config)
         inpainted = imk.convert_scale_abs(inpainted)
+        inpainted = postprocess_inpainted_result(
+            image,
+            mask,
+            inpainted,
+            edge_blend_px=2.0,
+        )
         return self._get_regular_patches(mask, inpainted)
 
     def inpaint_region(self, image: np.ndarray, region: tuple[int, int, int, int]) -> list[dict]:
@@ -198,7 +233,11 @@ class InpaintingHandler:
         config = get_config(self.main_page.settings_page)
         inpainted = self.inpainter_cache(crop, mask, config)
         inpainted = imk.convert_scale_abs(inpainted)
-        patch = inpainted[local_y:local_y + height, local_x:local_x + width].copy()
+        inpainted = postprocess_inpainted_result(crop, mask, inpainted)
+        patch = make_masked_patch(
+            inpainted[local_y:local_y + height, local_x:local_x + width],
+            mask[local_y:local_y + height, local_x:local_x + width],
+        )
         return [{'bbox': [x, y, width, height], 'image': patch}]
 
     def inpaint_complete(self, patch_list):
@@ -269,7 +308,10 @@ class InpaintingHandler:
                         continue
                         
                     # Extract the portion of the patch for this page
-                    clipped_patch = inpainted_image[clip_top:clip_bottom, x:x+w]
+                    clipped_patch = make_masked_patch(
+                        inpainted_image[clip_top:clip_bottom, x:x+w],
+                        mask[clip_top:clip_bottom, x:x+w],
+                    )
                     
                     # Convert coordinates back to page-local coordinates
                     page_local_y = clip_top - mapping['combined_y_start'] + mapping['page_crop_top']
@@ -289,7 +331,10 @@ class InpaintingHandler:
             # Regular mode - original behavior
             for c in contours:
                 x, y, w, h = imk.bounding_rect(c)
-                patch = inpainted_image[y:y+h, x:x+w]
+                patch = make_masked_patch(
+                    inpainted_image[y:y+h, x:x+w],
+                    mask[y:y+h, x:x+w],
+                )
                 patches.append({
                     'bbox': [x, y, w, h],
                     'image': patch.copy(),
@@ -299,6 +344,8 @@ class InpaintingHandler:
     
     def inpaint(self):
         mask = self.main_page.image_viewer.get_mask_for_inpainting()
-        painted = self.manual_inpaint()              
+        painted = self.manual_inpaint()
+        if mask is None or painted is None:
+            return []
         patches = self.get_inpainted_patches(mask, painted)
         return patches         

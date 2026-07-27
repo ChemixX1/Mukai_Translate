@@ -172,14 +172,14 @@ def _build_patch_layer(patch: dict[str, Any], index: int) -> Any | None:
 		if not os.path.isfile(png_path):
 			logger.warning("Patch %d: png_path does not exist: %s", index, png_path)
 			return None
-		patch_img = imk.read_image(png_path)
+		patch_img = imk.read_image(png_path, preserve_alpha=True)
 	else:
 		patch_img = patch.get("image")
 	if patch_img is None:
 		logger.warning("Patch %d: no image data available", index)
 		return None
 
-	patch_img = _ensure_rgb_uint8(patch_img)
+	patch_img = _ensure_rgb_or_rgba_uint8(patch_img)
 	ph, pw, _ = patch_img.shape
 	# PhotoshopAPI positions layers by center, so offset by half dimensions
 	return psapi.ImageLayer_8bit(
@@ -1020,6 +1020,16 @@ def _ensure_rgb_uint8(image: np.ndarray) -> np.ndarray:
 		img = img[:, :, :3]
 	if img.shape[2] != 3:
 		raise ValueError("Expected an RGB image array with 3 channels")
+	return img
+
+
+def _ensure_rgb_or_rgba_uint8(image: np.ndarray) -> np.ndarray:
+	"""Validate a patch without discarding its strict inpainting alpha mask."""
+	img = np.asarray(image)
+	if img.dtype != np.uint8:
+		img = np.clip(img, 0, 255).astype(np.uint8)
+	if img.ndim != 3 or img.shape[2] not in (3, 4):
+		raise ValueError("Expected an RGB or RGBA patch image")
 	return img
 
 

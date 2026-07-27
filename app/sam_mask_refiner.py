@@ -115,6 +115,7 @@ class SAMMaskRefiner:
         if refined.shape != mask.shape:
             raise SAMRefinementError("SAM generó una máscara con un tamaño inesperado.")
 
-        # A painted pixel is an explicit user decision.  Never let automatic
-        # segmentation remove it from the mask, even when SAM is uncertain.
+        # A painted pixel is an explicit user decision.  The isolated runner
+        # already clamps automatic additions to a two-pixel envelope; retain
+        # the user's pixels even when SAM is uncertain.
         return np.where((refined > 0) | (mask > 0), 255, 0).astype(np.uint8)

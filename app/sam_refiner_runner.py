@@ -35,6 +35,21 @@ def _sample_positive_points(mask: np.ndarray, maximum: int = 16) -> np.ndarray:
     return np.unique(np.vstack((centre, points)), axis=0)
 
 
+def _expand_binary(mask: np.ndarray, radius: int = 2) -> np.ndarray:
+    """Create the small, deterministic safety margin allowed around a stroke."""
+    source = np.asarray(mask, dtype=bool)
+    if radius <= 0:
+        return source.copy()
+    height, width = source.shape
+    padded = np.pad(source, radius, mode="constant", constant_values=False)
+    result = np.zeros_like(source)
+    diameter = (radius * 2) + 1
+    for dy in range(diameter):
+        for dx in range(diameter):
+            result |= padded[dy : dy + height, dx : dx + width]
+    return result
+
+
 def _choose_candidate(
     masks: np.ndarray,
     scores: np.ndarray,
@@ -42,12 +57,16 @@ def _choose_candidate(
 ) -> np.ndarray:
     """Pick a conservative SAM candidate and fall back to the painted mask."""
     rough = rough_mask > 0
+    allowed = _expand_binary(rough, radius=2)
     rough_area = max(1, int(rough.sum()))
     best: np.ndarray | None = None
     best_rank = float("-inf")
 
     for candidate, confidence in zip(masks, scores):
-        candidate = np.asarray(candidate, dtype=bool)
+        # SAM may recognise an entire balloon from a short stroke.  It can
+        # improve the local edge, but never receives permission to leave this
+        # two-pixel safety envelope.
+        candidate = np.asarray(candidate, dtype=bool) & allowed
         candidate_area = int(candidate.sum())
         if candidate_area == 0:
             continue
@@ -60,7 +79,7 @@ def _choose_candidate(
 
         # An entire speech bubble is a bad target for a magic eraser.  The
         # user-painted region is the safety boundary when SAM over-generalises.
-        if coverage < 0.55 or expansion > 14:
+        if coverage < 0.70 or expansion > 2.5:
             continue
 
         rank = (0.55 * coverage) + (0.30 * iou) + (0.15 * float(confidence))
@@ -70,7 +89,7 @@ def _choose_candidate(
 
     if best is None:
         return rough.astype(np.uint8) * 255
-    return np.where(best | rough, 255, 0).astype(np.uint8)
+    return np.where((best | rough) & allowed, 255, 0).astype(np.uint8)
 
 
 def refine(image: np.ndarray, mask: np.ndarray, checkpoint: str) -> np.ndarray:
@@ -128,7 +147,8 @@ def refine(image: np.ndarray, mask: np.ndarray, checkpoint: str) -> np.ndarray:
 
     output = np.zeros_like(rough, dtype=np.uint8)
     output[crop_y1:crop_y2, crop_x1:crop_x2] = _choose_candidate(masks, scores, crop_rough)
-    return np.where((output > 0) | (rough > 0), 255, 0).astype(np.uint8)
+    allowed = _expand_binary(rough > 0, radius=2)
+    return np.where(((output > 0) | (rough > 0)) & allowed, 255, 0).astype(np.uint8)
 
 
 def main() -> int:

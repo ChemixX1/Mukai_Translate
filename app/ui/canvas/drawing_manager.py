@@ -248,7 +248,13 @@ class DrawingManager:
                 return True
         return False
         
-    def generate_mask_from_strokes(self):
+    def generate_mask_from_strokes(self, *, expand: bool = True):
+        """Rasterise the visible strokes into an inpainting mask.
+
+        ``expand`` preserves the historical cleanup padding used by the normal
+        translation workflow.  Magic Eraser passes ``False`` so the physical
+        brush footprint remains the exact edit boundary.
+        """
         if not self.viewer.hasPhoto(): 
             return None
         
@@ -302,8 +308,20 @@ class DrawingManager:
                 # Fallback: no transformation if no mappings
                 print(f"[DEBUG] No mappings available, using direct scene coordinates")
         
-        human_pen = QPen(QColor(255, 255, 255), self.brush_size)
-        gen_pen = QPen(QColor(255, 255, 255), 2, Qt.SolidLine)
+        human_pen = QPen(
+            QColor(255, 255, 255),
+            self.brush_size,
+            Qt.SolidLine,
+            Qt.RoundCap,
+            Qt.RoundJoin,
+        )
+        gen_pen = QPen(
+            QColor(255, 255, 255),
+            2,
+            Qt.SolidLine,
+            Qt.RoundCap,
+            Qt.RoundJoin,
+        )
         human_painter.setPen(human_pen)
         gen_painter.setPen(gen_pen)
         brush = QBrush(QColor(255, 255, 255))
@@ -337,10 +355,13 @@ class DrawingManager:
         human_mask = qimage_to_np(human_qimg)
         gen_mask = qimage_to_np(gen_qimg)
 
-        # Dilate using backend (ksize approximated by kernel size)
-        kernel = np.ones((5,5), np.uint8)
-        human_mask = imk.dilate(human_mask, kernel, iterations=2)
-        gen_mask = imk.dilate(gen_mask, kernel, iterations=3)
+        if expand:
+            # Normal translation cleanup keeps its existing padding so text
+            # antialiasing is removed completely.  Strict Magic Eraser masks
+            # deliberately skip this expansion.
+            kernel = np.ones((5,5), np.uint8)
+            human_mask = imk.dilate(human_mask, kernel, iterations=2)
+            gen_mask = imk.dilate(gen_mask, kernel, iterations=3)
 
         # Combine masks (bitwise_or equivalent)
         final_mask = np.where((human_mask > 0) | (gen_mask > 0), 255, 0).astype(np.uint8)

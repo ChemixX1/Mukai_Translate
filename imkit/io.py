@@ -8,11 +8,12 @@ from PIL import Image
 from .utils import ensure_uint8
 
 
-def read_image(path: str) -> np.ndarray:
-    """Read an image file and return as RGB numpy array."""
+def read_image(path: str, *, preserve_alpha: bool = False) -> np.ndarray:
+    """Read an image file as RGB, or RGBA when explicitly requested."""
     im = Image.open(path)
-    if im.mode != "RGB":
-        im = im.convert("RGB")
+    target_mode = "RGBA" if preserve_alpha else "RGB"
+    if im.mode != target_mode:
+        im = im.convert(target_mode)
     arr = np.array(im)
     return arr
 

@@ -1133,7 +1133,7 @@ class ImageStateController:
                 return
             if saved['hash'] not in mem_hashes:
                 ensure_path_materialized(saved['png_path'])
-                rgb_img = imk.read_image(saved['png_path'])
+                rgb_img = imk.read_image(saved['png_path'], preserve_alpha=True)
                 if rgb_img is not None:
                     loaded.append({
                         'bbox': saved['bbox'],
@@ -1348,7 +1348,7 @@ class ImageStateController:
             else:
                 # load into memory
                 ensure_path_materialized(saved['png_path'])
-                rgb_img = imk.read_image(saved['png_path'])
+                rgb_img = imk.read_image(saved['png_path'], preserve_alpha=True)
                 prop = {
                     'bbox': saved['bbox'],
                     'image': rgb_img,

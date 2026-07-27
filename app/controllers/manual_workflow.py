@@ -617,7 +617,10 @@ class ManualWorkflowController:
             self.main.loading.setVisible(True)
             self.main.disable_hbutton_group()
             self.main.undo_group.activeStack().beginMacro("inpaint")
-            use_sam = bool(
+            magic_eraser_active = bool(
+                getattr(self.main.image_viewer, "magic_eraser_mode_active", False)
+            )
+            use_sam = magic_eraser_active and bool(
                 getattr(self.main.image_viewer, "magic_eraser_refine_with_sam", False)
             )
 
@@ -634,7 +637,7 @@ class ManualWorkflowController:
                 )
 
             self.main.run_threaded(
-                self.main.pipeline.magic_eraser_inpaint if use_sam else self.main.pipeline.inpaint,
+                self.main.pipeline.magic_eraser_inpaint if magic_eraser_active else self.main.pipeline.inpaint,
                 self.main.pipeline.inpaint_complete,
                 on_magic_eraser_error if use_sam else self.main.default_error_handler,
                 self.main.on_manual_finished,
